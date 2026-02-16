@@ -1,0 +1,13 @@
+__pycache__
+*.pyc
+.git
+.env
+*.csv
+daily_stats.json
+data/
+scripts/
+tests/
+WALKTHROUGH.md
+.dockerignore
+Dockerfile
+docker-compose.yml

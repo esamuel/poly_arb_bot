@@ -1,0 +1,28 @@
+version: "3.8"
+
+services:
+  polybot:
+    build: .
+    container_name: poly_arb_bot
+    restart: unless-stopped
+    ports:
+      - "${DASHBOARD_PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DASHBOARD_PORT=8080
+    volumes:
+      # Persist data files across container restarts
+      - ./data:/app/poly_arb_bot/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
