@@ -65,7 +65,7 @@
         </div>
 
         <!-- Stats Cards -->
-        <div class="grid grid-cols-2 md:grid-cols-6 gap-4 mb-6">
+        <div class="grid grid-cols-2 md:grid-cols-9 gap-4 mb-6">
             <div class="bg-dark-700 rounded-xl p-4 border border-gray-800">
                 <p class="text-gray-500 text-xs uppercase">Uptime</p>
                 <p id="stat-uptime" class="text-xl font-bold text-white mt-1">--</p>
@@ -87,9 +87,22 @@
                 <p id="stat-balance" class="text-xl font-bold text-green-400 mt-1">--</p>
             </div>
             <div class="bg-dark-700 rounded-xl p-4 border border-gray-800">
+                <p class="text-gray-500 text-xs uppercase">Reserved (Live Orders Est)</p>
+                <p id="stat-reserved" class="text-xl font-bold text-amber-300 mt-1">--</p>
+                <p id="stat-live-orders" class="text-[10px] text-gray-500 mt-1">Open orders: 0</p>
+            </div>
+            <div class="bg-dark-700 rounded-xl p-4 border border-gray-800">
                 <p class="text-gray-500 text-xs uppercase">Net Equity (Est)</p>
                 <p id="stat-equity" class="text-xl font-bold text-cyan-400 mt-1">--</p>
                 <p id="stat-open-pos" class="text-[10px] text-gray-500 mt-1">Open pos: 0</p>
+            </div>
+            <div class="bg-dark-700 rounded-xl p-4 border border-gray-800">
+                <p class="text-gray-500 text-xs uppercase">Realized PnL</p>
+                <p id="stat-realized" class="text-xl font-bold text-white mt-1">--</p>
+            </div>
+            <div class="bg-dark-700 rounded-xl p-4 border border-gray-800">
+                <p class="text-gray-500 text-xs uppercase">Unrealized PnL (Est)</p>
+                <p id="stat-unrealized" class="text-xl font-bold text-white mt-1">--</p>
             </div>
         </div>
 
@@ -227,8 +240,18 @@
             document.getElementById("stat-opps").textContent = d.opportunities_found;
             document.getElementById("stat-trades").textContent = d.trades_executed;
             document.getElementById("stat-balance").textContent = d.wallet_balance !== null ? `$${d.wallet_balance.toFixed(2)}` : "--";
+            document.getElementById("stat-reserved").textContent = `$${(d.reserved_in_live_orders_estimate || 0).toFixed(2)}`;
+            document.getElementById("stat-live-orders").textContent = `Open orders: ${d.live_orders_count || 0}`;
             document.getElementById("stat-equity").textContent = d.net_equity_estimate !== null ? `$${d.net_equity_estimate.toFixed(2)}` : "--";
             document.getElementById("stat-open-pos").textContent = `Open pos: ${d.open_positions_count || 0} | Pos MTM: $${(d.position_value_estimate || 0).toFixed(2)}`;
+            const realized = d.realized_pnl ?? d.daily_pnl ?? 0;
+            const unrealized = d.unrealized_pnl_estimate ?? 0;
+            const rEl = document.getElementById("stat-realized");
+            const uEl = document.getElementById("stat-unrealized");
+            rEl.textContent = `${realized >= 0 ? '+' : '-'}$${Math.abs(realized).toFixed(2)}`;
+            uEl.textContent = `${unrealized >= 0 ? '+' : '-'}$${Math.abs(unrealized).toFixed(2)}`;
+            rEl.className = `text-xl font-bold mt-1 ${realized >= 0 ? 'text-green-400' : 'text-red-400'}`;
+            uEl.className = `text-xl font-bold mt-1 ${unrealized >= 0 ? 'text-green-400' : 'text-red-400'}`;
 
             // Opportunities
             const oppDiv = document.getElementById("opportunities-list");

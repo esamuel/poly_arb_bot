@@ -5,6 +5,7 @@ import threading
 import logging
 import time
 import re
+import os
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
@@ -32,6 +33,81 @@ class PolymarketAdapter:
         self.api_secret = POLYMARKET_API_SECRET
         self.passphrase = POLYMARKET_PASSPHRASE
         self.private_key = PRIVATE_KEY
+        self.proxy_address = PROXY_ADDRESS
+        proxy_flag = str(os.getenv("USE_PROXY_MODE", "0")).strip().lower()
+        self.use_proxy_mode = bool(self.proxy_address and proxy_flag in ("1", "true", "yes", "on"))
+        self.signature_type = 2 if self.use_proxy_mode else 0
+        
+        # Configure WARP proxy for geo-restriction bypass
+        self.warp_proxy = os.getenv("WARP_PROXY", "")
+        if self.warp_proxy:
+            # Monkey-patch the request function to use a proxied client
+            try:
+                import httpx
+                from httpx_socks import SyncProxyTransport
+                from py_clob_client.http_helpers import helpers as clob_helpers
+                
+                # Create proxied client
+                _proxied_client = httpx.Client(
+                    http2=True,
+                    transport=SyncProxyTransport.from_url(self.warp_proxy)
+                )
+                
+                # Save original request function
+                _original_request = clob_helpers.request
+                
+                # Create wrapper that uses proxied client
+                def proxied_request(endpoint, method, headers=None, data=None):
+                    try:
+                        headers = clob_helpers.overloadHeaders(method, headers)
+                        if isinstance(data, str):
+                            resp = _proxied_client.request(
+                                method=method,
+                                url=endpoint,
+                                headers=headers,
+                                content=data.encode("utf-8"),
+                            )
+                        else:
+                            resp = _proxied_client.request(
+                                method=method,
+                                url=endpoint,
+                                headers=headers,
+                                json=data,
+                            )
+                        
+                        if resp.status_code != 200:
+                            from py_clob_client.exceptions import PolyApiException
+                            raise PolyApiException(resp)
+                        
+                        try:
+                            return resp.json()
+                        except ValueError:
+                            return resp.text
+                    except httpx.RequestError:
+                        from py_clob_client.exceptions import PolyApiException
+                        raise PolyApiException(error_msg="Request exception!")
+                
+                # Replace HTTP functions in helpers module
+                clob_helpers.request = proxied_request
+                _proxied_post = lambda endpoint, headers=None, data=None: proxied_request(endpoint, "POST", headers, data)
+                _proxied_get = lambda endpoint, headers=None, data=None: proxied_request(endpoint, "GET", headers, data)
+                _proxied_delete = lambda endpoint, headers=None, data=None: proxied_request(endpoint, "DELETE", headers, data)
+                _proxied_put = lambda endpoint, headers=None, data=None: proxied_request(endpoint, "PUT", headers, data)
+                clob_helpers.post = _proxied_post
+                clob_helpers.get = _proxied_get
+                clob_helpers.delete = _proxied_delete
+                clob_helpers.put = _proxied_put
+                
+                # CRITICAL: client.py imported post/get/delete directly,
+                # so we must also patch them in the client module's namespace
+                from py_clob_client import client as clob_client_module
+                clob_client_module.post = _proxied_post
+                clob_client_module.get = _proxied_get
+                clob_client_module.delete = _proxied_delete
+                logger.info(f"✓ Patched py_clob_client HTTP functions (helpers + client) with SOCKS proxy: {self.warp_proxy}")
+            except Exception as e:
+                logger.error(f"✗ Failed to patch py_clob_client: {e}")
+                raise
         
         self.ws = None
         self.ws_thread = None
@@ -41,7 +117,7 @@ class PolymarketAdapter:
         self._reconnect_count = 0
         self._max_reconnect_delay = 60  # Max seconds between reconnect attempts
         
-        # Initialize ClobClient for Order execution
+        # Initialize ClobClient for Order execution (httpx already patched globally above)
         self.client = None
         if self.private_key and self.api_key:
             try:
@@ -50,13 +126,19 @@ class PolymarketAdapter:
                     api_secret=self.api_secret, 
                     api_passphrase=self.passphrase
                 )
-                self.client = ClobClient(
-                    host=self.clob_url, 
-                    key=self.private_key, 
-                    chain_id=137, 
-                    creds=creds
-                )
-                logger.info("ClobClient initialized for trading (EOA Mode).")
+                client_kwargs = {
+                    "host": self.clob_url,
+                    "key": self.private_key,
+                    "chain_id": 137,
+                    "creds": creds,
+                }
+                if self.use_proxy_mode:
+                    client_kwargs["funder"] = self.proxy_address
+                    client_kwargs["signature_type"] = 2
+                self.client = ClobClient(**client_kwargs)
+                mode = "Proxy Mode (signature_type=2)" if self.signature_type == 2 else "EOA Mode (signature_type=0)"
+                proxy_status = f" via {self.warp_proxy}" if self.warp_proxy else ""
+                logger.info(f"ClobClient initialized for trading ({mode}){proxy_status}.")
             except Exception as e:
                 logger.error(f"Failed to init ClobClient: {e}")
 
@@ -183,9 +265,17 @@ class PolymarketAdapter:
             self.ws_thread.start()
 
     def _run_ws(self):
-        """Run WebSocket with ping/pong keepalive."""
+        """Run WebSocket with ping/pong keepalive and proxy support."""
         try:
-            self.ws.run_forever(ping_interval=30, ping_timeout=10)
+            # Configure SOCKS proxy for WebSocket if WARP is enabled
+            ws_kwargs = {"ping_interval": 30, "ping_timeout": 10}
+            if self.warp_proxy and "socks5://" in self.warp_proxy:
+                proxy_parts = self.warp_proxy.replace("socks5://", "").split(":")
+                if len(proxy_parts) == 2:
+                    ws_kwargs["proxy_type"] = "socks5"
+                    ws_kwargs["http_proxy_host"] = proxy_parts[0]
+                    ws_kwargs["http_proxy_port"] = int(proxy_parts[1])
+            self.ws.run_forever(**ws_kwargs)
         except Exception as e:
             logger.error(f"WebSocket run_forever error: {e}")
         finally:
@@ -315,7 +405,7 @@ class PolymarketAdapter:
             return {}
         try:
             from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=0)
+            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=self.signature_type)
             return self.client.get_balance_allowance(params)
         except Exception as e:
             logger.error(f"Error checking balance: {e}")
@@ -326,8 +416,8 @@ class PolymarketAdapter:
         if not self.client: return None
         try:
             from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-            logger.info("Enabling trading permissions (EOA Mode)...")
-            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=0)
+            logger.info(f"Enabling trading permissions (signature_type={self.signature_type})...")
+            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=self.signature_type)
             resp = self.client.update_balance_allowance(params)
             logger.info(f"Permission Update Sent: {resp}")
             return resp
@@ -335,7 +425,69 @@ class PolymarketAdapter:
             logger.error(f"Failed to update permissions: {e}")
             return None
 
+    def get_open_orders(self):
+        """Fetch current orders from CLOB (best effort)."""
+        if not self.client:
+            return []
+        try:
+            orders = self.client.get_orders()
+            if isinstance(orders, dict):
+                return orders.get("orders") or orders.get("data") or orders.get("items") or []
+            if isinstance(orders, list):
+                return orders
+            return []
+        except Exception as e:
+            logger.error(f"Error fetching open orders: {e}")
+            return []
+
+    def cancel_order(self, order_id: str):
+        """Cancel an open order by ID."""
+        if not self.client:
+            logger.warning("Cannot cancel order: ClobClient not initialized.")
+            return None
+        try:
+            resp = self.client.cancel(order_id)
+            logger.info(f"Cancelled order {order_id[:16]}...: {resp}")
+            return resp
+        except Exception as e:
+            logger.error(f"Error cancelling order {order_id[:16]}...: {e}")
+            return None
+
     # --- EXECUTION METHODS ---
+
+    def place_close_order(self, token_id: str, side: str, price: float, num_shares: float):
+        """
+        Place an order to close a position (size is in SHARES, not USD).
+        Used by the close_position feature and the recycler.
+        """
+        if not self.client:
+            logger.error("Cannot place order: ClobClient not initialized.")
+            return None
+        order_side = BUY if side.upper() == 'BUY' else SELL
+        try:
+            price = round(price, 2)
+            if price <= 0:
+                logger.error(f"Invalid price {price}. Must be > 0.")
+                return None
+            if price >= 1.0:
+                price = 0.99
+            size_shares = round(num_shares, 2)
+            if size_shares < 0.1:
+                logger.warning(f"Order too small: {size_shares} shares. Skipping.")
+                return None
+            order_args = OrderArgs(
+                price=price,
+                size=size_shares,
+                side=order_side,
+                token_id=token_id
+            )
+            logger.info(f"Close Order: {side} {size_shares:.2f} shares of ...{token_id[-8:]} @ ${price}")
+            resp = self.client.create_and_post_order(order_args)
+            logger.info(f"Close Order Response: {resp}")
+            return resp
+        except Exception as e:
+            logger.error(f"Close Order Failed: {e}", exc_info=True)
+            return None
 
     def place_limit_order(self, token_id: str, side: str, price: float, size: float):
         """

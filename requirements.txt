@@ -1,4 +1,4 @@
-requests
+requests[socks]
 websocket-client
 numpy
 scipy
@@ -11,3 +11,8 @@ eth-account
 py-clob-client
 flask
 gunicorn
+httpx[socks]
+httpx-socks
+socksio
+pysocks
+python-socks[asyncio]

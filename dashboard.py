@@ -80,9 +80,27 @@ def api_settings():
     result = bot.update_settings(data)
     return jsonify(result)
 
+@app.route("/api/positions")
+@requires_auth
+def api_positions():
+    return jsonify(bot.get_positions())
+
+@app.route("/api/close_position", methods=["POST"])
+@requires_auth
+def api_close_position():
+    data = request.get_json() or {}
+    token_id = data.get("token_id", "")
+    result = bot.close_position(token_id)
+    return jsonify(result)
+
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "bot": bot.state["status"]})
+    return jsonify({
+        "status": "ok",
+        "bot": bot.state["status"],
+        "role": bot.state.get("role", "primary"),
+        "uptime": bot.state.get("uptime", 0),
+    })
 
 
 if __name__ == "__main__":

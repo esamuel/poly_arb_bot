@@ -1,7 +1,8 @@
 import logging
 import math
 from typing import Dict, Any, List
-from poly_arb_bot.config import MIN_PROFIT_THRESHOLD, MAX_POSITION_SIZE, EXECUTION_MODE, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+import poly_arb_bot.config as cfg
+from poly_arb_bot.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 import json
 import os
 import requests
@@ -9,7 +10,7 @@ from datetime import datetime
 
 
 MAX_DAILY_LOSS = 10.0  # Circuit Breaker limit ($)
-MAX_DAILY_TRADES = 50   # Maximum trades per day
+MAX_DAILY_TRADES = 500  # Maximum trades per day
 STATS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "daily_stats.json")
 
 logger = logging.getLogger(__name__)
@@ -105,24 +106,26 @@ class ExecutionEngine:
         """
         if not orders:
             logger.info("No orders to execute.")
-            return
+            return []
 
         total_value = sum(o.get('size', 0) for o in orders)
         logger.info(f"Preparing to execute {len(orders)} orders. Total Value: ${total_value:.2f}")
 
         # --- PAPER MODE ---
-        if EXECUTION_MODE != "LIVE":
+        if cfg.EXECUTION_MODE != "LIVE":
             logger.info(f"[PAPER MODE] Simulated execution of {len(orders)} orders:")
+            simulated_results = []
             for o in orders:
                 shares = o['size'] / o['price'] if o['price'] > 0 else 0
                 logger.info(f"  [PAPER] {o['side']} ${o['size']:.2f} ({shares:.1f} shares) of ...{o['token_id'][-8:]} @ {o['price']:.4f}")
+                simulated_results.append({"order": o, "response": {"status": "paper"}, "filled": False, "ok": True})
             
             # Send telegram alert even in paper mode
             msg = f"<b>[PAPER] Arb Signal</b>\n"
             for o in orders:
                 msg += f"{o['side']} ${o['size']:.2f} @ {o['price']:.4f}\n"
             self.send_telegram_alert(msg)
-            return
+            return simulated_results
 
         # --- LIVE EXECUTION ---
         if not self.check_safety():
@@ -132,6 +135,7 @@ class ExecutionEngine:
         
         successful_orders = 0
         failed_orders = 0
+        execution_results = []
         
         for order in orders:
             try:
@@ -144,6 +148,12 @@ class ExecutionEngine:
                 if resp:
                     successful_orders += 1
                     logger.info(f"Order Placed: {resp}")
+                    status = str(resp.get("status", "")).lower() if isinstance(resp, dict) else ""
+                    taking = str(resp.get("takingAmount", "")).strip() if isinstance(resp, dict) else ""
+                    making = str(resp.get("makingAmount", "")).strip() if isinstance(resp, dict) else ""
+                    # Treat only immediate matches (or explicit fill amounts) as filled inventory.
+                    filled = (status == "matched") or (bool(taking) and bool(making))
+                    execution_results.append({"order": order, "response": resp, "filled": filled, "ok": True})
                     self.send_telegram_alert(
                         f"<b>Order Placed!</b>\n"
                         f"Token: ...{order['token_id'][-8:]}\n"
@@ -154,6 +164,7 @@ class ExecutionEngine:
                 else:
                     failed_orders += 1
                     logger.error(f"Order Failed for ...{order['token_id'][-8:]}")
+                    execution_results.append({"order": order, "response": None, "filled": False, "ok": False})
                     self.send_telegram_alert(
                         f"<b>Order Failed!</b>\n"
                         f"Token: ...{order['token_id'][-8:]}\n"
@@ -163,6 +174,7 @@ class ExecutionEngine:
             except Exception as e:
                 failed_orders += 1
                 logger.error(f"Execution Error: {e}", exc_info=True)
+                execution_results.append({"order": order, "response": {"error": str(e)}, "filled": False, "ok": False})
                 self.send_telegram_alert(f"<b>Execution Error:</b> {str(e)[:200]}")
 
         # Track trade count (even partial fills count)
@@ -182,3 +194,4 @@ class ExecutionEngine:
                 f"{successful_orders}/{len(orders)} legs filled.\n"
                 f"Check positions for unhedged exposure!"
             )
+        return execution_results
