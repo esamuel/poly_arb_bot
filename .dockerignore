@@ -5,7 +5,6 @@ __pycache__
 *.csv
 daily_stats.json
 data/
-scripts/
 tests/
 WALKTHROUGH.md
 .dockerignore
