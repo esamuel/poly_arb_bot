@@ -17,7 +17,7 @@ from collections import deque
 from pathlib import Path
 
 from poly_arb_bot.config import (
-    LOG_LEVEL, EXECUTION_MODE, MIN_PROFIT_THRESHOLD, 
+    EXECUTION_MODE, MIN_PROFIT_THRESHOLD, 
     MAX_POSITION_SIZE, POLYMARKET_API_KEY, PRIVATE_KEY, OPENAI_API_KEY
 )
 from poly_arb_bot.adapters.polymarket import PolymarketAdapter
@@ -30,34 +30,112 @@ logger = logging.getLogger(__name__)
 # --- Constants ---
 POLYMARKET_FEE_RATE = 0.01
 SLIPPAGE_BUFFER = 0.005
-TRADE_COOLDOWN_SECONDS = int(os.getenv("TRADE_COOLDOWN_SECONDS", "15"))
+# Round-trip cost floor.  An opportunity MUST exceed 2× (fee + slippage)
+# to have any chance of being profitable.  Previously set to 0.001 which
+# guaranteed losses after the 2% round-trip cost.
+MIN_EFFECTIVE_EDGE = max(2 * (POLYMARKET_FEE_RATE + SLIPPAGE_BUFFER), 0.035)
+TRADE_COOLDOWN_SECONDS = int(os.getenv("TRADE_COOLDOWN_SECONDS", "10"))
 MAX_PAIRS_TO_ANALYZE = 15
 MAX_MARKETS_TO_FETCH = 1000
 ENTRY_BAND = 0.01
-MAX_SPREAD_PCT = 0.35
+MAX_SPREAD_PCT = 0.15
 MIN_EXEC_PRICE = 0.01
 MAX_EXEC_PRICE = 0.99
 MAX_LIVE_ORDERS = 12
-STALE_ORDER_TIMEOUT_SECONDS = 90
-CASH_RESERVE_RATIO = float(os.getenv("CASH_RESERVE_RATIO", "0.30"))
-MAX_CAPITAL_PER_TRADE_RATIO = float(os.getenv("MAX_CAPITAL_PER_TRADE_RATIO", "0.15"))
+STALE_ORDER_TIMEOUT_SECONDS = 60  # cancel unfilled orders after 60s
+CASH_RESERVE_RATIO = float(os.getenv("CASH_RESERVE_RATIO", "0.40"))  # keep 40% liquid
+MAX_CAPITAL_PER_TRADE_RATIO = float(os.getenv("MAX_CAPITAL_PER_TRADE_RATIO", "0.10"))  # max 10% per trade
+PREFER_SPORTS_TECH = os.getenv("PREFER_SPORTS_TECH", "1").strip().lower() in ("1", "true", "yes")
+MIN_SPORTS_TECH_PAIRS = int(os.getenv("MIN_SPORTS_TECH_PAIRS", "8"))
+MAX_POLITICS_PAIRS = int(os.getenv("MAX_POLITICS_PAIRS", "2"))
+
+# --- ABSOLUTE CAPITAL FLOOR ---
+# Never allow wallet to drop below this amount.  Trades that would breach
+# this floor are blocked.  Set via env or defaults to $5.
+MIN_WALLET_FLOOR = float(os.getenv("MIN_WALLET_FLOOR", "5.0"))
 
 # --- Quick-Flip Take-Profit / Stop-Loss ---
-TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "0.03"))   # Exit when +3% above entry
-STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.08"))       # Cut loss at -8% below entry
+TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "0.02"))   # Exit at +2% (fast exit)
+STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.05"))       # Cut loss at -5%
 FLIP_CHECK_INTERVAL = int(os.getenv("FLIP_CHECK_SECONDS", "10"))  # Check exits every 10s
+FILL_CONFIRM_WINDOW_SECONDS = int(os.getenv("FILL_CONFIRM_WINDOW_SECONDS", "15"))
+FILL_CONFIRM_POLL_SECONDS = float(os.getenv("FILL_CONFIRM_POLL_SECONDS", "2"))
 
-# --- Position Recycler Settings (fast turnover) ---
+# --- Position Recycler Settings (fast turnover for paper testing) ---
 RECYCLE_ENABLED = os.getenv("RECYCLE_ENABLED", "1").strip().lower() in ("1", "true", "yes")
-RECYCLE_INTERVAL_SECONDS = int(os.getenv("RECYCLE_INTERVAL_MINUTES", "60")) * 60  # every 60 min
-RECYCLE_MIN_HOLD_SECONDS = int(os.getenv("RECYCLE_MIN_HOLD_MINUTES", "30")) * 60  # 30 min minimum hold
-RECYCLE_MAX_HOLD_SECONDS = int(os.getenv("RECYCLE_MAX_HOLD_HOURS", "4")) * 3600   # 4h force sell
-RECYCLE_MIN_CASH_RESERVE = float(os.getenv("RECYCLE_MIN_CASH", "10.0"))
+# Support both MINUTES and legacy HOURS env vars
+_recycle_interval_min = os.getenv("RECYCLE_INTERVAL_MINUTES")
+_recycle_min_hold_min = os.getenv("RECYCLE_MIN_HOLD_MINUTES")
+_recycle_max_hold_min = os.getenv("RECYCLE_MAX_HOLD_MINUTES")
+if _recycle_interval_min:
+    RECYCLE_INTERVAL_SECONDS = int(_recycle_interval_min) * 60
+else:
+    RECYCLE_INTERVAL_SECONDS = int(os.getenv("RECYCLE_INTERVAL_HOURS", "1")) * 3600
+if _recycle_min_hold_min:
+    RECYCLE_MIN_HOLD_SECONDS = int(_recycle_min_hold_min) * 60
+else:
+    RECYCLE_MIN_HOLD_SECONDS = int(float(os.getenv("RECYCLE_MIN_HOLD_HOURS", "0.5")) * 3600)
+if _recycle_max_hold_min:
+    RECYCLE_MAX_HOLD_SECONDS = int(_recycle_max_hold_min) * 60
+else:
+    RECYCLE_MAX_HOLD_SECONDS = int(os.getenv("RECYCLE_MAX_HOLD_HOURS", "1")) * 3600
+RECYCLE_MIN_CASH_RESERVE = float(os.getenv("RECYCLE_MIN_CASH", str(MIN_WALLET_FLOOR)))
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 OPPORTUNITY_LOG_FILE = os.path.join(PROJECT_DIR, "opportunities.csv")
 DATA_DIR = os.path.join(PROJECT_DIR, "data")
 RUNTIME_STATE_FILE = os.path.join(DATA_DIR, "runtime_state.json")
+
+# ---------- Category keyword sets ----------
+CRYPTO_KEYWORDS = {
+    "bitcoin","btc","ethereum","eth","crypto","cryptocurrency","solana","sol",
+    "bnb","xrp","ripple","cardano","ada","doge","dogecoin","usdc","usdt",
+    "defi","nft","blockchain","altcoin","polygon","matic","avax","avalanche",
+    "chainlink","link","uniswap","aave","dai","litecoin","ltc","binance",
+    "stablecoin","token","coin","coins","tokens","wallet","satoshi",
+}
+
+SPORTS_KEYWORDS = {
+    # Leagues / governing bodies
+    "nfl","nba","mlb","nhl","mls","ufc","pga","ncaa","fifa","uefa","atp","wta",
+    # Events
+    "super","bowl","championship","playoff","playoffs","finals","stanley","cup",
+    "worldcup","world","series","open","classic","grand","prix","olympics",
+    # Actions / outcomes
+    "win","wins","beat","defeat","score","scores","scored","title","trophy",
+    "draft","trade","transfer","contract","roster","suspended","injured",
+    # Sport names
+    "football","basketball","baseball","soccer","tennis","golf","boxing","mma",
+    "wrestling","hockey","cricket","rugby","racing","f1","formula",
+    # Generic sports terms
+    "game","games","match","matches","season","tournament","league","team","teams",
+    "player","players","coach","quarterback","touchdown","homerun","goal",
+}
+
+AI_TECH_KEYWORDS = {
+    # AI companies & models
+    "ai","openai","anthropic","gpt","claude","gemini","llm","llms","chatgpt",
+    "deepmind","mistral","grok","perplexity","copilot","sora",
+    # AI concepts
+    "artificial","intelligence","machine","learning","neural","benchmark","agi",
+    "superintelligence","reasoning","multimodal","inference","training","parameter",
+    # Big Tech / leaders
+    "nvidia","apple","google","amazon","meta","microsoft","tesla","spacex",
+    "altman","musk","bezos","zuckerberg","pichai","nadella","huang",
+    # Tech events
+    "release","launch","version","update","regulation","antitrust","acquisition",
+    "merger","ipo","funding","valuation","startup",
+    # Other tech
+    "quantum","computing","robotics","autonomous","self-driving","semiconductor",
+    "chip","chips","cloud","cybersecurity","hack","breach",
+}
+
+POLITICS_KEYWORDS = {
+    "election","elections","elect","vote","voting","ballot","poll","polls",
+    "prime","minister","president","parliament","congress","senate","government",
+    "coalition","party","candidate","incumbent","campaign","mayor","governor",
+    "hungary","hungarian","orban","magyar","toroczkai",
+}
 
 
 def convert_outcomes_to_vectors(outcome_tuples: List[Tuple[str, str]]) -> np.array:
@@ -89,7 +167,7 @@ class MonitoringSession:
             outcomes = m.get("outcomes", ["No", "Yes"])
             if isinstance(outcomes, str):
                 try: outcomes = json.loads(outcomes)
-                except: outcomes = ["No", "Yes"]
+                except (json.JSONDecodeError, ValueError): outcomes = ["No", "Yes"]
             if len(tokens) < 2: continue
 
             yes_idx, no_idx = -1, -1
@@ -183,7 +261,7 @@ class BotController:
             "last_error": None,
             "min_profit_threshold": MIN_PROFIT_THRESHOLD,
             "max_position_size": MAX_POSITION_SIZE,
-            "effective_threshold": MIN_PROFIT_THRESHOLD + POLYMARKET_FEE_RATE + SLIPPAGE_BUFFER,
+            "effective_threshold": max(MIN_PROFIT_THRESHOLD + POLYMARKET_FEE_RATE + SLIPPAGE_BUFFER, MIN_EFFECTIVE_EDGE),
         }
         
         # Recent activity logs (ring buffer)
@@ -192,7 +270,8 @@ class BotController:
         self.recent_trades: deque = deque(maxlen=50)
         self.sessions_info: List[Dict] = []
         self.position_book: Dict[str, Dict[str, float]] = {}
-        
+        self.exec_engine = None  # Set in run(); used by exit/recycler to record realized P&L
+
         # Config validation
         self.state["config_ok"] = bool(POLYMARKET_API_KEY and PRIVATE_KEY)
         self.state["llm_ok"] = bool(OPENAI_API_KEY)
@@ -263,7 +342,7 @@ class BotController:
                 
                 time.sleep(CHECK_INTERVAL if not bot_running else RECOVERY_CHECK)
 
-    def _log(self, level: str, message: str):
+    def _log(self, level: str, message: str, **kwargs):
         """Add log entry to recent logs and standard logger."""
         entry = {
             "time": datetime.now().strftime("%H:%M:%S"),
@@ -271,7 +350,7 @@ class BotController:
             "msg": message
         }
         self.recent_logs.append(entry)
-        getattr(logger, level.lower(), logger.info)(message)
+        getattr(logger, level.lower(), logger.info)(message, **kwargs)
 
     def _load_runtime_state(self):
         """Restore persisted wallet/position state across restarts."""
@@ -301,6 +380,23 @@ class BotController:
                 }
             self.position_book = restored
             self._recompute_equity()
+
+            # Sanity check: if net equity is deeply negative, the position book is
+            # corrupt (e.g. phantom SHORTs from the hydration sign bug). Wipe it so
+            # the reconciler can re-hydrate clean state from the exchange on startup.
+            try:
+                net_eq = float(self.state.get("net_equity_estimate") or 0.0)
+            except (TypeError, ValueError):
+                net_eq = 0.0
+            if net_eq < -1.0:
+                logger.warning(
+                    f"STARTUP: net_equity_estimate=${net_eq:.2f} is deeply negative — "
+                    f"position book is likely corrupt. Wiping {len(self.position_book)} "
+                    f"phantom position(s) and forcing re-hydration from exchange."
+                )
+                self.position_book = {}
+                self._recompute_equity()
+
             logger.info(
                 "Restored runtime state: %d positions, wallet=%s",
                 len(self.position_book),
@@ -340,65 +436,81 @@ class BotController:
             return
         if self.position_book:
             return
-        client = getattr(adapter, "client", None)
-        if client is None:
-            return
         try:
-            raw = None
-            for method_name in ("get_positions", "get_open_positions", "get_user_positions"):
-                method = getattr(client, method_name, None)
-                if callable(method):
-                    raw = method()
-                    if raw:
-                        break
-            if not raw:
-                return
+        # Prefer Data API (adapter.get_portfolio_positions) as it matches the UI
+            pos_list = adapter.get_portfolio_positions()
+            
+            if not pos_list:
+                # Fallback to ClobClient if Data API fails or returns nothing
+                client = getattr(adapter, "client", None)
+                if client:
+                    for method_name in ("get_positions", "get_open_positions", "get_user_positions"):
+                        method = getattr(client, method_name, None)
+                        if callable(method):
+                            raw = method()
+                            if raw:
+                                if isinstance(raw, dict):
+                                    pos_list = raw.get("positions") or raw.get("data") or raw.get("items") or []
+                                elif isinstance(raw, list):
+                                    pos_list = raw
+                                break
 
-            if isinstance(raw, dict):
-                pos_list = raw.get("positions") or raw.get("data") or raw.get("items") or []
-            elif isinstance(raw, list):
-                pos_list = raw
-            else:
+            if not pos_list:
                 return
 
             restored = 0
             for p in pos_list:
                 if not isinstance(p, dict):
                     continue
-                token_id = str(p.get("asset_id") or p.get("token_id") or p.get("id") or "")
+                    
+                # Data API fields vs CLOB fields mapping
+                # asset (Data API) is the decimal tokenId. asset_id/token_id (CLOB) are typically hex.
+                token_id = str(p.get("asset") or p.get("asset_id") or p.get("token_id") or p.get("conditionId") or p.get("id") or "")
                 if not token_id:
                     continue
+                    
                 qty = p.get("size", p.get("amount", p.get("quantity", p.get("shares", 0.0))))
                 try:
                     shares = float(qty)
                 except Exception:
                     continue
+                    
+                # In Polymarket CLOB, all positions are LONG (you hold tokens, never negative).
+                # "outcome" is the token label (Yes/No), NOT the trade direction — never use it
+                # to infer short. Only explicit "side"/"direction" fields indicate direction.
                 side = str(p.get("side") or p.get("direction") or "").upper()
                 if side in ("SELL", "SHORT"):
                     shares = -abs(shares)
+                else:
+                    shares = abs(shares)
+                    
                 if abs(shares) < 1e-8:
                     continue
-                mark = p.get("mark_price", p.get("mid_price", p.get("avg_entry_price", p.get("price", 0.5))))
+                    
+                mark = p.get("mark_price", p.get("mid_price", p.get("avg_entry_price", p.get("curPrice", 0.5))))
                 try:
                     last_mid = float(mark)
                 except Exception:
                     last_mid = 0.5
-                entry_raw = p.get("avg_entry_price", p.get("entry_price", last_mid))
+                    
+                entry_raw = p.get("avg_entry_price", p.get("entry_price", p.get("avgPrice", last_mid)))
                 try:
                     avg_entry = float(entry_raw)
                 except Exception:
                     avg_entry = last_mid
+                    
                 self.position_book[token_id] = {
                     "shares": shares,
                     "last_mid": last_mid,
                     "avg_entry": avg_entry,
+                    "question": p.get("title", p.get("question", "Imported Position")),
                 }
                 restored += 1
 
             if restored > 0:
                 self._recompute_equity()
                 self._save_runtime_state()
-                self._log("INFO", f"Hydrated {restored} positions from exchange API.")
+                self._log("INFO", f"Hydrated {restored} positions from Polymarket API.")
         except Exception as e:
             self._log("WARNING", f"Position hydration skipped: {e}")
 
@@ -470,6 +582,11 @@ class BotController:
                 reserved += price * qty
                 live_count += 1
 
+        # Sanity cap: reserved should not exceed 2× balance (API may return raw units)
+        balance = self.state.get("wallet_balance") or 0.0
+        if balance > 0 and reserved > balance * 2:
+            logger.warning(f"Reserve estimate ${reserved:.2f} > 2× balance ${balance:.2f}; capping.")
+            reserved = balance * 2
         return max(reserved, 0.0), live_count
 
     def _refresh_account_metrics(self, adapter):
@@ -507,7 +624,10 @@ class BotController:
         """Update bot settings dynamically."""
         if "min_profit_threshold" in settings:
             self.state["min_profit_threshold"] = float(settings["min_profit_threshold"])
-            self.state["effective_threshold"] = self.state["min_profit_threshold"] + POLYMARKET_FEE_RATE + SLIPPAGE_BUFFER
+            self.state["effective_threshold"] = max(
+                self.state["min_profit_threshold"] + POLYMARKET_FEE_RATE + SLIPPAGE_BUFFER,
+                MIN_EFFECTIVE_EDGE,
+            )
         if "max_position_size" in settings:
             self.state["max_position_size"] = float(settings["max_position_size"])
         if "mode" in settings and settings["mode"] in ("PAPER", "LIVE"):
@@ -541,43 +661,62 @@ class BotController:
         return sorted(positions, key=lambda x: abs(x["market_value"]), reverse=True)
 
     def close_position(self, token_id: str) -> Dict:
-        """Close a position by placing a sell/buy order using actual exchange balance."""
-        if not token_id or token_id not in self.position_book:
-            return {"ok": False, "msg": f"Position not found for token ...{token_id[-8:] if token_id else '?'}"}
+        """Close a position by placing a sell/buy order using actual exchange balance.
+        If token not in position_book, fetches balance from exchange (supports portfolio Close button)."""
+        if not token_id:
+            return {"ok": False, "msg": "No token_id provided"}
 
-        pos = self.position_book[token_id]
-        shares = float(pos.get("shares", 0.0))
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            adapter = PolymarketAdapter()
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.CONDITIONAL,
+                token_id=token_id,
+                signature_type=adapter.signature_type
+            )
+            adapter.client.update_balance_allowance(params)
+            bal = adapter.client.get_balance_allowance(params)
+            actual_shares = int(bal.get("balance", "0")) / 1e6
+        except Exception as e:
+            self._log("ERROR", f"Failed to fetch balance for ...{token_id[-8:]}: {e}")
+            return {"ok": False, "msg": str(e)}
+
+        if actual_shares < 1:
+            # Not in book and no exchange balance — try reconciling first
+            if token_id not in self.position_book:
+                self._reconcile_position_book(adapter)
+                if token_id in self.position_book:
+                    pos = self.position_book[token_id]
+                    actual_shares = float(pos.get("shares", 0.0))
+            if actual_shares < 1:
+                return {"ok": False, "msg": f"Position not found or too small (...{token_id[-8:]})"}
+
+        pos = self.position_book.get(token_id, {})
         mid = float(pos.get("last_mid", 0.0))
+        if mid <= 0:
+            book = adapter.get_midmarket_price(token_id)
+            mid = book.get("mid", 0.05)
+        shares = actual_shares
 
         if abs(shares) < 1:
             return {"ok": False, "msg": f"Position too small to close ({shares:.2f} shares)"}
 
         try:
-            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-            adapter = PolymarketAdapter()
-
             if shares > 0:
-                # Long position -> SELL to close
-                # Check actual token balance on exchange (not our internal book)
-                params = BalanceAllowanceParams(
-                    asset_type=AssetType.CONDITIONAL,
-                    token_id=token_id,
-                    signature_type=2
-                )
+                # Long position -> SELL to close (re-fetch balance for freshness)
                 adapter.client.update_balance_allowance(params)
                 bal = adapter.client.get_balance_allowance(params)
                 actual_shares = int(bal.get("balance", "0")) / 1e6
-
                 if actual_shares < 1:
                     return {"ok": False, "msg": f"No shares found on exchange (book says {shares:.0f}, exchange says {actual_shares:.0f})"}
 
-                sell_price = round(max(mid - 0.01, 0.01), 2)
+                sell_price = self._compute_exit_price(adapter, token_id, mid, "SELL")
                 num_shares = round(actual_shares - 1, 0)  # keep 1 share buffer
                 self._log("INFO", f"CLOSING LONG: SELL {num_shares:.0f} of {actual_shares:.0f} actual shares of ...{token_id[-8:]} @ ${sell_price}")
                 resp = adapter.place_close_order(token_id, "SELL", sell_price, num_shares)
             else:
                 # Short position -> BUY to close
-                buy_price = round(min(mid + 0.01, 0.99), 2)
+                buy_price = self._compute_exit_price(adapter, token_id, mid, "BUY")
                 num_shares = round(abs(shares), 2)
                 self._log("INFO", f"CLOSING SHORT: BUY {num_shares:.0f} shares of ...{token_id[-8:]} @ ${buy_price}")
                 resp = adapter.place_close_order(token_id, "BUY", buy_price, num_shares)
@@ -611,9 +750,11 @@ class BotController:
         try:
             self._log("INFO", f"Bot starting in {self.state['mode']} mode...")
             self.state["started_at"] = time.time()
+            self.state["status"] = "starting"
             
             adapter = PolymarketAdapter()
             exec_engine = ExecutionEngine(adapter)
+            self.exec_engine = exec_engine  # Store so _check_exit_signals / _run_position_recycler can record P&L
             self.state["daily_pnl"] = float(exec_engine.daily_pnl)
             self.state["realized_pnl"] = float(exec_engine.daily_pnl)
             dep_detector = DependencyDetector()
@@ -622,67 +763,28 @@ class BotController:
             adapter.connect_ws()
             time.sleep(2)
 
-            # Fetch markets
-            self._log("INFO", "Fetching markets...")
-            markets = adapter.get_markets(limit=MAX_MARKETS_TO_FETCH)
-            if not markets:
-                self._log("ERROR", "No markets fetched. Check network.")
-                self.state["status"] = "error"
-                self.state["last_error"] = "No markets fetched"
-                return
-            self._log("INFO", f"Fetched {len(markets)} active markets.")
-
-            # Check balance
+            # Check initial balance & positions
             if self.state["mode"] == "LIVE":
                 self._refresh_account_metrics(adapter)
-                self._log("INFO", f"Wallet balance: ${self.state.get('wallet_balance', 0.0):.2f}")
                 self._hydrate_positions_from_exchange(adapter)
+                self._recompute_equity()
 
-            # Find pairs
-            self._log("INFO", "Analyzing market pairs with LLM...")
-            all_pairs = self._find_related_pairs(markets, dep_detector)
-            if not all_pairs:
-                self._log("ERROR", "No dependent market pairs found.")
-                self.state["status"] = "error"
-                self.state["last_error"] = "No dependent pairs found"
-                return
+            self.state["status"] = "scanning"
+            self._log("INFO", "Bot services active. Initializing market monitoring...")
 
-            self.state["pairs_monitored"] = len(all_pairs)
-            self._log("INFO", f"Found {len(all_pairs)} dependent market pairs.")
-
-            # Create sessions
             sessions = []
             all_token_ids = []
-            for pair_markets, valid_outcomes in all_pairs:
-                session = MonitoringSession(pair_markets, valid_outcomes)
-                sessions.append(session)
-                all_token_ids.extend(list(session.token_map.keys()))
             
-            self.state["tokens_subscribed"] = len(all_token_ids)
-            self.sessions_info = [s.to_dict() for s in sessions]
+            # Monitoring loop state
+            last_pair_scan = 0
+            PAIR_SCAN_INTERVAL = 300  # Scan for new pairs every 5 mins
+            poll_counter = 0
+            last_recycle_time = time.time()
+            last_flip_check = time.time()
 
-            # Subscribe
-            adapter.subscribe(all_token_ids)
-
-            # Initial REST fetch
-            self._log("INFO", "Fetching initial order books...")
-            for session in sessions:
-                for token_id in session.token_map:
-                    book = adapter.get_midmarket_price(token_id)
-                    if book["mid"] > 0:
-                        session.update_price(token_id, book["mid"], book["bid"], book["ask"])
-                profit, mu_star = session.run_analysis()
-                if profit and profit > 0.001:
-                    self._record_opportunity(profit, session)
-
-            self.sessions_info = [s.to_dict() for s in sessions]
-            self.state["status"] = "running"
-            self._log("INFO", "Bot is LIVE and monitoring.")
-
-            # WS callback
-            effective_threshold = self.state["effective_threshold"]
-            
+            # Defined up here so sessions can refer to it
             def on_price_update(data):
+                nonlocal sessions
                 try:
                     if not isinstance(data, dict): return
                     token_id = data.get("asset_id")
@@ -704,13 +806,17 @@ class BotController:
                         self._update_mark_price(token_id, mid)
                         profit, mu_star = session.run_analysis()
                         if profit is None or profit <= 0.0001: continue
-
+                        
                         self._record_opportunity(profit, session)
-
+                        
                         cur_threshold = self._adaptive_threshold(session)
-                        if profit <= cur_threshold: continue
-                        self.state["tradable_opportunities"] += 1
-                        if not session.can_trade(): continue
+                        if profit <= cur_threshold or not session.can_trade(): continue
+
+                        # SAFETY CHECK: $5 cash floor
+                        cash = self.state.get("wallet_balance", 0.0)
+                        if self.state["mode"] == "LIVE" and cash < MIN_WALLET_FLOOR:
+                            self._log("WARNING", f"Trade blocked: Cash balance ${cash:.2f} is below safety floor ${MIN_WALLET_FLOOR}.")
+                            continue
 
                         self._log("INFO", f"TRADE SIGNAL (WS): Profit ${profit:.4f}")
                         orders = self._build_orders(session, mu_star)
@@ -721,27 +827,54 @@ class BotController:
 
             adapter.add_callback(on_price_update)
 
-            # Main loop
-            poll_counter = 0
-            last_recycle_time = time.time()
-            last_flip_check = time.time()
-            REST_POLL_INTERVAL = 2
-
+            # --- Main Loop ---
             while not self._stop_event.is_set():
                 time.sleep(1)
-                if self._stop_event.is_set(): break
                 poll_counter += 1
 
-                # WS health
-                if not adapter.is_ws_connected():
-                    self._log("WARNING", "WebSocket disconnected! Reconnecting...")
-                    adapter.reconnect_ws()
-                    time.sleep(2)
-                    if adapter.is_ws_connected():
-                        adapter.subscribe(all_token_ids)
-                        self._log("INFO", "Reconnected.")
+                # A. Scan for pairs if needed (e.g. initial start or periodically)
+                seconds_since_last_scan = time.time() - last_pair_scan
+                if (not sessions and seconds_since_last_scan > 60) or (seconds_since_last_scan > PAIR_SCAN_INTERVAL):
+                    pair_count_before = len(sessions)
+                    self.state["status"] = "scanning"
+                    markets = adapter.get_markets(limit=MAX_MARKETS_TO_FETCH)
+                    if markets:
+                        all_pairs = self._find_related_pairs(markets, dep_detector)
+                        if all_pairs:
+                            sessions = []
+                            all_token_ids = []
+                            for pm, vo in all_pairs:
+                                s = MonitoringSession(pm, vo)
+                                sessions.append(s)
+                                all_token_ids.extend(list(s.token_map.keys()))
+                            
+                            adapter.subscribe(all_token_ids)
+                            # Pre-fill prices
+                            for s in sessions:
+                                for tid in s.token_map:
+                                    book = adapter.get_midmarket_price(tid)
+                                    if book["mid"] > 0:
+                                        s.update_price(tid, book["mid"], book["bid"], book["ask"])
+                            
+                            self.state["pairs_monitored"] = len(sessions)
+                            self.state["tokens_subscribed"] = len(all_token_ids)
+                            self.sessions_info = [s.to_dict() for s in sessions]
+                            self._log("INFO", f"Scanning complete: Monitoring {len(sessions)} pairs.")
+                        else:
+                            if pair_count_before == 0:
+                                self._log("INFO", "No dependent pairs found in initial scan. Will keep searching (cooldown active)...")
 
-                # Quick-flip exit check (take-profit / stop-loss)
+                    last_pair_scan = time.time()
+                    self.state["status"] = "running" if sessions else "scanning"
+
+                # B. WebSocket health
+                if not adapter.is_ws_connected():
+                    self._log("WARNING", "WebSocket offline. Reconnecting...")
+                    adapter.reconnect_ws()
+                    if adapter.is_ws_connected() and all_token_ids:
+                        adapter.subscribe(all_token_ids)
+
+                # C. Exit signals (TP/SL)
                 if self.state["mode"] == "LIVE" and (time.time() - last_flip_check) >= FLIP_CHECK_INTERVAL:
                     try:
                         self._check_exit_signals(adapter)
@@ -749,59 +882,69 @@ class BotController:
                     except Exception as e:
                         self._log("WARNING", f"Exit check error: {e}")
 
-                # Cancel stale live orders
-                if poll_counter % REST_POLL_INTERVAL == 0 and self.state["mode"] == "LIVE":
+                # D. Cancel stale orders
+                if poll_counter % 30 == 0 and self.state["mode"] == "LIVE":
                     self._cancel_stale_orders(adapter)
 
-                # Position recycler (runs on interval; runs more often when cash is low, but not every second)
+                # E. Position recycler
                 if self.state["mode"] == "LIVE":
-                    cash = self.state.get("wallet_balance") or 0.0
+                    cash = self.state.get("wallet_balance", 0.0)
                     time_since_recycle = time.time() - last_recycle_time
-                    low_cash_interval = 300  # 5 min when cash is low (not every second)
-                    interval = low_cash_interval if cash < RECYCLE_MIN_CASH_RESERVE else RECYCLE_INTERVAL_SECONDS
-                    if time_since_recycle >= interval:
+                    # Recycler runs every interval, OR every 5 mins if cash is critically low
+                    rc_interval = min(RECYCLE_INTERVAL_SECONDS, 300) if cash < MIN_WALLET_FLOOR else RECYCLE_INTERVAL_SECONDS
+                    if time_since_recycle >= rc_interval:
                         try:
                             self._run_position_recycler(adapter)
                             last_recycle_time = time.time()
                         except Exception as e:
                             self._log("WARNING", f"Recycler error: {e}")
-                
-                # REST poll
-                if poll_counter % REST_POLL_INTERVAL == 0:
+
+                # F. Periodic REST poll & balance refresh
+                if poll_counter % 30 == 0:
                     for session in sessions:
                         for token_id in session.token_map:
                             book = adapter.get_midmarket_price(token_id)
                             if book["mid"] > 0:
                                 session.update_price(token_id, book["mid"], book["bid"], book["ask"])
                                 self._update_mark_price(token_id, book["mid"])
+                        
+                        # Background trade check (REST-based)
                         profit, mu_star = session.run_analysis()
-                        if profit and profit > 0.001:
-                            self._record_opportunity(profit, session)
-                            cur_threshold = self._adaptive_threshold(session)
-                            if profit > cur_threshold and session.can_trade():
-                                self.state["tradable_opportunities"] += 1
-                                self._log("INFO", f"TRADE SIGNAL (REST): Profit ${profit:.4f}")
+                        if profit and profit > self._adaptive_threshold(session) and session.can_trade():
+                            # Re-check floor
+                            if self.state["mode"] != "LIVE" or self.state["wallet_balance"] >= MIN_WALLET_FLOOR:
                                 orders = self._build_orders(session, mu_star)
                                 if orders:
                                     self._execute_orders(exec_engine, orders, session, adapter)
                     
-                    self.sessions_info = [s.to_dict() for s in sessions]
-                    # Update balance periodically
                     if self.state["mode"] == "LIVE":
                         self._refresh_account_metrics(adapter)
+                    self.sessions_info = [s.to_dict() for s in sessions]
 
-            self._log("INFO", "Bot stopped cleanly.")
+                # G. Runtime reconciliation (every ~10 min)
+                if poll_counter % 600 == 0 and self.state["mode"] == "LIVE":
+                    try:
+                        self._runtime_reconcile_positions(adapter)
+                    except Exception as e:
+                        self._log("WARNING", f"Runtime reconciliation error: {e}")
+
             self.state["status"] = "stopped"
-            self._save_runtime_state()
+            self._log("INFO", "Bot loop ended.")
 
         except Exception as e:
-            self._log("ERROR", f"Bot crashed: {e}")
+            self._log("ERROR", f"Bot crashed: {e}", exc_info=True)
             self.state["status"] = "error"
             self.state["last_error"] = str(e)
             self._save_runtime_state()
 
     def _find_related_pairs(self, markets, dep_detector):
-        """Find related pairs DIVERSIFIED across different topics."""
+        """Find related pairs DIVERSIFIED across different topics.
+        
+        Scoring now incorporates:
+        - Structural similarity (stem matching, ladder keywords)
+        - Liquidity (avg volume × tighter spread = higher score)
+        - Time preference (shorter resolution horizon = higher score)
+        """
         stop = {"will","the","be","in","price","of","to","above","below","a","by","on","at",
                 "for","is","it","or","and","this","that","with","from","an","are","was","were",
                 "has","have","do","does","before","after","than","more","less","?","how","many",
@@ -817,19 +960,52 @@ class BotController:
                 if not isinstance(t1, list) or len(t1) < 2: continue
                 if not isinstance(t2, list) or len(t2) < 2: continue
                 q1, q2 = m1['question'].lower(), m2['question'].lower()
+                # --- Crypto exclusion: skip any pair where either question is crypto-related ---
+                q1_words = set(q1.split())
+                q2_words = set(q2.split())
+                if (q1_words & CRYPTO_KEYWORDS) or (q2_words & CRYPTO_KEYWORDS):
+                    continue
                 overlap = (set(q1.split()) & set(q2.split())) - stop
                 if len(overlap) >= 2:
-                    # Create a "topic key" from shared words to detect same-topic pairs
                     topic_key = tuple(sorted(overlap))
-                    # execution-first structural score:
-                    # prefer same-stem ladder markets (between/less/more style ranges)
                     stem1 = re.sub(r"\b(20\d{2}|\$?\d[\d,\.]*[bkmt]?|between|less|more|than|at|least|over|under)\b", " ", q1)
                     stem2 = re.sub(r"\b(20\d{2}|\$?\d[\d,\.]*[bkmt]?|between|less|more|than|at|least|over|under)\b", " ", q2)
                     stem1 = " ".join(stem1.split())
                     stem2 = " ".join(stem2.split())
                     same_stem = 1 if stem1[:80] == stem2[:80] else 0
                     ladder_like = 1 if (("between" in q1 or "less than" in q1 or "more than" in q1) and ("between" in q2 or "less than" in q2 or "more than" in q2)) else 0
-                    execution_score = (len(overlap) * 10) + (same_stem * 40) + (ladder_like * 25)
+
+                    # --- Structural score ---
+                    structural = (len(overlap) * 10) + (same_stem * 40) + (ladder_like * 25)
+
+                    # --- Liquidity score  (NEW) ---
+                    vol1 = float(m1.get("_volume_24h", 0))
+                    vol2 = float(m2.get("_volume_24h", 0))
+                    avg_vol = (vol1 + vol2) / 2.0
+                    spr1 = float(m1.get("_spread_pct", 1.0))
+                    spr2 = float(m2.get("_spread_pct", 1.0))
+                    avg_spread = (spr1 + spr2) / 2.0
+                    # More volume + tighter spread = better.  log scale to dampen outliers.
+                    import math
+                    liquidity_score = math.log1p(avg_vol) * 5 * max(1.0 - avg_spread, 0.1)
+
+                    # --- Horizon score (NEW): prefer sooner-resolving markets ---
+                    d1 = m1.get("_days_to_end")
+                    d2 = m2.get("_days_to_end")
+                    if d1 is not None and d2 is not None:
+                        avg_days = (d1 + d2) / 2.0
+                        horizon_score = max(30 - avg_days, 0) * 0.5  # up to +15 for same-day
+                    else:
+                        horizon_score = 0
+
+                    # --- Category boost: heavily reward Sports and AI/Tech pairs ---
+                    category_boost = 0
+                    if overlap & SPORTS_KEYWORDS:
+                        category_boost += 80
+                    if overlap & AI_TECH_KEYWORDS:
+                        category_boost += 60
+
+                    execution_score = structural + liquidity_score + horizon_score + category_boost
                     all_candidates.append((m1, m2, len(overlap), topic_key, execution_score))
 
         self._log("INFO", f"Found {len(all_candidates)} total candidate pairs.")
@@ -838,11 +1014,9 @@ class BotController:
         from collections import defaultdict
         topic_groups = defaultdict(list)
         for m1, m2, score, topic, exec_score in all_candidates:
-            # Use top-3 shared words as topic fingerprint
             short_topic = tuple(sorted(topic)[:3])
             topic_groups[short_topic].append((m1, m2, score, topic, exec_score))
 
-        # Sort each topic group by score, pick top 2 per topic
         MAX_PER_TOPIC = 2
         diversified = []
         for topic, pairs in sorted(topic_groups.items(), key=lambda x: -max(p[4] for p in x[1])):
@@ -852,24 +1026,83 @@ class BotController:
             if len(diversified) >= MAX_PAIRS_TO_ANALYZE * 2:
                 break
 
-        # Take top N overall
-        diversified = diversified[:MAX_PAIRS_TO_ANALYZE]
+        # Step 2b: Category rebalance to avoid politics concentration
+        def _pair_category(m1, m2):
+            words = set(m1["question"].lower().split()) | set(m2["question"].lower().split())
+            if (words & SPORTS_KEYWORDS) or (words & AI_TECH_KEYWORDS):
+                return "preferred"  # SPORTS or AI/TECH
+            if words & POLITICS_KEYWORDS:
+                return "politics"
+            return "other"
+
+        if PREFER_SPORTS_TECH:
+            preferred_pairs = []
+            politics_pairs = []
+            other_pairs = []
+            for pair in diversified:
+                m1, m2, _, _, _ = pair
+                cat = _pair_category(m1, m2)
+                if cat == "preferred":
+                    preferred_pairs.append(pair)
+                elif cat == "politics":
+                    politics_pairs.append(pair)
+                else:
+                    other_pairs.append(pair)
+
+            selected = []
+            preferred_target = min(len(preferred_pairs), min(MIN_SPORTS_TECH_PAIRS, MAX_PAIRS_TO_ANALYZE))
+            selected.extend(preferred_pairs[:preferred_target])
+
+            politics_cap = max(0, MAX_POLITICS_PAIRS)
+            remaining_slots = MAX_PAIRS_TO_ANALYZE - len(selected)
+            selected.extend(politics_pairs[:min(politics_cap, remaining_slots)])
+
+            remaining_slots = MAX_PAIRS_TO_ANALYZE - len(selected)
+            selected.extend(other_pairs[:remaining_slots])
+
+            remaining_slots = MAX_PAIRS_TO_ANALYZE - len(selected)
+            if remaining_slots > 0:
+                selected.extend(preferred_pairs[preferred_target:preferred_target + remaining_slots])
+
+            remaining_slots = MAX_PAIRS_TO_ANALYZE - len(selected)
+            if remaining_slots > 0:
+                selected.extend(politics_pairs[min(politics_cap, len(politics_pairs)):min(politics_cap, len(politics_pairs)) + remaining_slots])
+
+            diversified = selected[:MAX_PAIRS_TO_ANALYZE]
+            self._log(
+                "INFO",
+                f"Category rebalance: preferred={len(preferred_pairs)}, politics={len(politics_pairs)}, "
+                f"other={len(other_pairs)}, selected={len(diversified)}"
+            )
+        else:
+            diversified = diversified[:MAX_PAIRS_TO_ANALYZE]
         
         topics_found = set()
         for _, _, _, topic, _ in diversified:
             topics_found.add(tuple(sorted(topic)[:3]))
         self._log("INFO", f"Selected {len(diversified)} pairs across {len(topics_found)} different topics.")
 
-        # Step 3: LLM analysis
+        # Step 3: LLM analysis (cached — see engine/dependency.py)
         found = []
         for m1, m2, score, topic, exec_score in diversified:
             if self._stop_event.is_set(): break
-            self._log("INFO", f"LLM analyzing(score={exec_score}): '{m1['question'][:50]}' vs '{m2['question'][:50]}'")
+            cats = []
+            combined_q = set(m1['question'].lower().split()) | set(m2['question'].lower().split())
+            if combined_q & SPORTS_KEYWORDS: cats.append("SPORTS")
+            if combined_q & AI_TECH_KEYWORDS: cats.append("AI/TECH")
+            if not cats: cats.append("OTHER")
+            self._log("INFO", f"LLM analyzing [{'+'.join(cats)}](score={exec_score:.1f}): '{m1['question'][:50]}' vs '{m2['question'][:50]}'")
             result = dep_detector.analyze_market_pair(m1, m2)
             if result and len(result) < 4:
                 self._log("INFO", f"Dependency found! ({len(result)} valid combos)")
                 matrix = convert_outcomes_to_vectors(result)
                 found.append(([m1, m2], matrix))
+
+        # Log LLM cache efficiency
+        stats = dep_detector.get_cache_stats()
+        total = stats['hits'] + stats['misses']
+        if total > 0:
+            self._log("INFO", f"LLM cache: {stats['hits']}/{total} hits ({stats['hits']*100//max(total,1)}% saved)")
         return found
 
     def _build_orders(self, session, mu_star):
@@ -901,6 +1134,10 @@ class BotController:
                     "size": leg, "fair_value": round(fair, 4),
                 })
             elif fair < price * (1 - ENTRY_BAND) and price >= MIN_EXEC_PRICE:
+                # Only SELL tokens we actually hold — Polymarket has no true short-selling.
+                pos = self.position_book.get(tid, {})
+                if pos.get("shares", 0) <= 0:
+                    continue
                 ep = session.best_bids.get(tid, price)
                 if ep <= 0: ep = price
                 if ep < MIN_EXEC_PRICE or ep > MAX_EXEC_PRICE:
@@ -909,15 +1146,54 @@ class BotController:
                     "token_id": tid, "side": "SELL", "price": round(ep, 4),
                     "size": leg, "fair_value": round(fair, 4),
                 })
+
+        # Avoid single-leg directional bets from a multi-leg arb detector.
+        if len(orders) < 2:
+            return []
+
+        # Conservative gate: recompute divergence with executable prices
+        # (buy at ask, sell at bid) and skip if edge vanishes after costs.
+        exec_prices = np.array(session.prices, dtype=float).copy()
+        for o in orders:
+            idx = session.token_map.get(o["token_id"])
+            if idx is not None:
+                exec_prices[idx] = float(o["price"])
+
+        exec_profit = MarketMath.calculate_profit(exec_prices, mu_star)
+        threshold = self._adaptive_threshold(session)
+        if exec_profit <= threshold:
+            self._log(
+                "INFO",
+                f"Skip signal: executable edge {exec_profit:.5f} <= threshold {threshold:.5f}",
+            )
+            return []
+
+        # Optional dollar sanity check for BUY capital deployment.
+        buy_notional = sum(float(o["size"]) for o in orders if o["side"] == "BUY")
+        if buy_notional > 0:
+            est_dollar = MarketMath.estimate_dollar_profit(
+                exec_prices, mu_star, buy_notional, fee_rate=POLYMARKET_FEE_RATE
+            )
+            if est_dollar <= 0:
+                self._log(
+                    "INFO",
+                    f"Skip signal: estimated net dollar profit <= 0 (est=${est_dollar:.4f})",
+                )
+                return []
+
         return orders
 
     def _adaptive_threshold(self, session) -> float:
         """
         Dynamic execution threshold:
+        - Never go below MIN_EFFECTIVE_EDGE (covers round-trip fees + slippage).
         - Keep user's configured threshold as the upper bound.
-        - Allow lower threshold on tighter books to increase executable flow.
+        - Allow lower threshold on tighter books to increase executable flow,
+          but ONLY down to the fee-breakeven floor.
         """
         configured = float(self.state["effective_threshold"])
+        # Absolute floor: must cover 2× (fee + slippage) to break even
+        floor = MIN_EFFECTIVE_EDGE
         spreads = []
         mids = []
         for tid in session.token_map.keys():
@@ -929,20 +1205,19 @@ class BotController:
                     spreads.append((ask - bid) / max(mid, 0.01))
                     mids.append(mid)
         if not spreads:
-            return configured
+            return max(configured, floor)
         avg_spread = sum(spreads) / len(spreads)
         avg_mid = sum(mids) / len(mids) if mids else 0.5
 
-        # Tight books can be traded at lower theoretical edge.
-        # This keeps a dynamic floor but avoids missing sub-cent opportunities
-        # that were historically executable on liquid pairs.
+        # Tight books can be traded at lower theoretical edge,
+        # but still must clear the fee floor.
         if avg_spread <= 0.05 and 0.03 <= avg_mid <= 0.97:
-            return min(configured, 0.0008)
+            return max(min(configured, floor * 1.0), floor)
         if avg_spread <= 0.10 and 0.02 <= avg_mid <= 0.98:
-            return min(configured, 0.0015)
+            return max(min(configured, floor * 1.2), floor)
         if avg_spread <= 0.18 and 0.01 <= avg_mid <= 0.99:
-            return min(configured, 0.0030)
-        return configured
+            return max(min(configured, floor * 1.5), floor)
+        return max(configured, floor)
 
     def _execute_orders(self, exec_engine, orders, session, adapter):
         if not self._trade_lock.acquire(blocking=False):
@@ -952,7 +1227,111 @@ class BotController:
         finally:
             self._trade_lock.release()
 
+    def _get_token_share_balance(self, adapter, token_id: str) -> float:
+        """Read authoritative exchange share balance for one conditional token."""
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.CONDITIONAL,
+                token_id=token_id,
+                signature_type=adapter.signature_type
+            )
+            bal = adapter.client.get_balance_allowance(params)
+            return int(bal.get("balance", "0")) / 1e6
+        except Exception:
+            return 0.0
+
+    def _confirm_recent_fills(self, adapter, exec_results, pre_balances: Dict[str, float]):
+        """
+        Confirm fills by polling real exchange balances shortly after order placement.
+        This captures delayed/partial matches that are not marked as immediate fills.
+        """
+        if not exec_results or not pre_balances:
+            return
+
+        poll_every = max(FILL_CONFIRM_POLL_SECONDS, 0.5)
+        deadline = time.time() + max(FILL_CONFIRM_WINDOW_SECONDS, 1)
+        tokens = list(pre_balances.keys())
+        latest = dict(pre_balances)
+
+        while time.time() < deadline:
+            for tid in tokens:
+                latest[tid] = self._get_token_share_balance(adapter, tid)
+            time.sleep(poll_every)
+
+        # Net share movement by token after execution window
+        net_delta = {tid: latest.get(tid, 0.0) - pre_balances.get(tid, 0.0) for tid in tokens}
+
+        # Reserve already-accounted immediate fills so we don't double count.
+        reserved_buy = {}
+        reserved_sell = {}
+        for r in exec_results:
+            if not r.get("filled"):
+                continue
+            o = r.get("order", {})
+            tid = o.get("token_id")
+            side = str(o.get("side", "")).upper()
+            price = float(o.get("price", 0) or 0)
+            size = float(o.get("size", 0) or 0)
+            if not tid or price <= 0:
+                continue
+            shares = size / price
+            if side == "BUY":
+                reserved_buy[tid] = reserved_buy.get(tid, 0.0) + shares
+            elif side == "SELL":
+                reserved_sell[tid] = reserved_sell.get(tid, 0.0) + shares
+
+        remaining = {}
+        for tid, delta in net_delta.items():
+            buy_rem = max(delta, 0.0) - reserved_buy.get(tid, 0.0)
+            sell_rem = max(-delta, 0.0) - reserved_sell.get(tid, 0.0)
+            remaining[(tid, "BUY")] = max(buy_rem, 0.0)
+            remaining[(tid, "SELL")] = max(sell_rem, 0.0)
+
+        confirmed = 0
+        for r in exec_results:
+            if not r.get("ok") or r.get("filled"):
+                continue
+            o = r.get("order", {})
+            tid = o.get("token_id")
+            side = str(o.get("side", "")).upper()
+            price = float(o.get("price", 0) or 0)
+            size = float(o.get("size", 0) or 0)
+            if not tid or side not in ("BUY", "SELL") or price <= 0 or size <= 0:
+                continue
+
+            expected_shares = size / price
+            key = (tid, side)
+            avail = remaining.get(key, 0.0)
+            matched_shares = min(expected_shares, avail)
+            if matched_shares < 0.1:
+                continue
+
+            remaining[key] = max(avail - matched_shares, 0.0)
+            matched_order = dict(o)
+            matched_order["size"] = round(matched_shares * price, 4)
+            self._apply_filled_order(matched_order)
+            r["filled"] = True
+            r["confirmed_by_balance"] = True
+            r["filled_shares"] = round(matched_shares, 4)
+            confirmed += 1
+
+        if confirmed > 0:
+            self._log("INFO", f"Post-trade confirm: {confirmed} delayed fill(s) reconciled from exchange balances.")
+
     def _execute_orders_inner(self, exec_engine, orders, session, adapter):
+        total_buy_cost = sum(o["size"] for o in orders if o["side"] == "BUY")
+
+        # ── CAPITAL FLOOR CHECK (LIVE only; PAPER mode uses simulated balance) ──
+        if self.state.get("mode") == "LIVE":
+            balance = self.state.get("wallet_balance") or 0.0
+            if balance - total_buy_cost < MIN_WALLET_FLOOR:
+                self._log("WARNING",
+                    f"🛑 CAPITAL FLOOR: ${balance:.2f} - ${total_buy_cost:.2f} trade "
+                    f"= ${balance - total_buy_cost:.2f} (floor=${MIN_WALLET_FLOOR:.2f}). BLOCKED."
+                )
+                return
+
         if self.state.get("mode") == "LIVE":
             current_live = self.state.get("live_orders_count", 0)
             if current_live >= MAX_LIVE_ORDERS:
@@ -965,7 +1344,15 @@ class BotController:
             equity = self.state.get("net_equity_estimate") or balance
             reserved = self.state.get("reserved_in_live_orders_estimate", 0.0)
 
-            min_reserve = max(min(equity * CASH_RESERVE_RATIO, balance * 0.40), 2.0)
+            # Re-check floor with fresh balance
+            if balance - total_buy_cost < MIN_WALLET_FLOOR:
+                self._log("WARNING",
+                    f"🛑 CAPITAL FLOOR (refreshed): ${balance:.2f} bal "
+                    f"- ${total_buy_cost:.2f} = ${balance - total_buy_cost:.2f}. BLOCKED."
+                )
+                return
+
+            min_reserve = max(min(equity * CASH_RESERVE_RATIO, balance * 0.40), MIN_WALLET_FLOOR)
             available = balance - reserved - min_reserve
             if available <= 0:
                 self._log("WARNING",
@@ -999,11 +1386,20 @@ class BotController:
         import poly_arb_bot.config as cfg
         cfg.EXECUTION_MODE = self.state["mode"]
 
+        pre_balances = {}
+        if self.state.get("mode") == "LIVE":
+            try:
+                token_ids = sorted({str(o.get("token_id", "")) for o in orders if o.get("token_id")})
+                pre_balances = {tid: self._get_token_share_balance(adapter, tid) for tid in token_ids}
+            except Exception:
+                pre_balances = {}
+
         exec_results = exec_engine.execute_arbitrage(orders)
         if self.state.get("mode") == "LIVE":
             for r in exec_results:
                 if r.get("filled"):
                     self._apply_filled_order(r["order"])
+            self._confirm_recent_fills(adapter, exec_results, pre_balances)
         session.mark_traded()
 
         cfg.EXECUTION_MODE = original_mode
@@ -1073,6 +1469,37 @@ class BotController:
         if token_id in self.position_book and mid > 0:
             self.position_book[token_id]["last_mid"] = mid
 
+    def _compute_exit_price(self, adapter: PolymarketAdapter, token_id: str, mid: float, side: str) -> float:
+        """
+        Dynamic close pricing using live top-of-book when available.
+        Falls back to a small adaptive concession from mid.
+        """
+        tick = 0.01
+        side_u = side.upper()
+        bid = ask = 0.0
+        try:
+            book = adapter.get_midmarket_price(token_id)
+            bid = float(book.get("bid", 0.0) or 0.0)
+            ask = float(book.get("ask", 0.0) or 0.0)
+        except Exception:
+            pass
+
+        spread = max(ask - bid, 0.0) if ask > 0 and bid > 0 else 0.0
+        concession = max(tick, min(spread * 0.25, 0.03))
+
+        if side_u == "SELL":
+            if bid > 0:
+                px = max(bid, mid - concession)
+            else:
+                px = max(mid - concession, MIN_EXEC_PRICE)
+        else:
+            if ask > 0 and ask < 0.999:
+                px = min(ask, mid + concession)
+            else:
+                px = min(mid + concession, MAX_EXEC_PRICE)
+
+        return round(min(max(px, MIN_EXEC_PRICE), MAX_EXEC_PRICE), 2)
+
     def _check_exit_signals(self, adapter):
         """
         Quick-flip exit logic: close positions that hit take-profit or stop-loss.
@@ -1124,7 +1551,7 @@ class BotController:
                     params = BalanceAllowanceParams(
                         asset_type=AssetType.CONDITIONAL,
                         token_id=token_id,
-                        signature_type=2
+                        signature_type=adapter.signature_type
                     )
                     adapter.client.update_balance_allowance(params)
                     bal = adapter.client.get_balance_allowance(params)
@@ -1132,9 +1559,7 @@ class BotController:
                     if actual < 1:
                         self.position_book.pop(token_id, None)
                         continue
-                    sell_price = round(max(mid - 0.01, 0.01), 2)
-                    if sell_price >= 1.0:
-                        sell_price = 0.99
+                    sell_price = self._compute_exit_price(adapter, token_id, mid, "SELL")
                     num = round(actual - 1, 0)
                     if num < 1:
                         self.position_book.pop(token_id, None)
@@ -1146,7 +1571,7 @@ class BotController:
                     resp = adapter.place_close_order(token_id, "SELL", sell_price, num)
                 else:
                     cash = self.state.get("wallet_balance") or 0.0
-                    buy_price = round(min(mid + 0.01, 0.99), 2)
+                    buy_price = self._compute_exit_price(adapter, token_id, mid, "BUY")
                     num = round(abs(shares), 2)
                     cost = buy_price * num
                     if cash < cost + 2.0:
@@ -1159,6 +1584,20 @@ class BotController:
 
                 if resp:
                     exits_triggered += 1
+                    # Record realized P&L from the actual exit price (not mid estimate).
+                    if is_long:
+                        realized_pnl = (sell_price - avg_entry) * num
+                    else:
+                        realized_pnl = (avg_entry - buy_price) * num
+                    engine = self.exec_engine
+                    if engine is not None:
+                        engine.record_trade_result(realized_pnl)
+                        self.state["daily_pnl"] = engine.daily_pnl
+                        self.state["realized_pnl"] = float(engine.daily_pnl)
+                    # Remove from position book immediately so the next 10s tick
+                    # doesn't re-trigger the same exit order before the reconciler runs.
+                    self.position_book.pop(token_id, None)
+                    self._recompute_equity()
             except Exception as e:
                 self._log("WARNING", f"Exit order failed for ...{token_id[-8:]}: {e}")
 
@@ -1227,7 +1666,7 @@ class BotController:
                             self._log("INFO", f"Cancelling stale order (age={int(age_seconds)}s): {order_id[:16]}...")
                             adapter.cancel_order(order_id)
                             cancelled_count += 1
-                except Exception as e:
+                except Exception:
                     continue
             
             if cancelled_count > 0:
@@ -1238,14 +1677,155 @@ class BotController:
             self._log("WARNING", f"Stale order cleanup failed: {e}")
 
     # ------------------------------------------------------------------
-    # Position Recycler: auto-sell positions to free cash for new trades
+    # Runtime reconciliation: continuous sync against Polymarket Data API
     # ------------------------------------------------------------------
+
+    def _runtime_reconcile_positions(self, adapter):
+        """
+        Full reconciliation against Polymarket Data API (runs every ~10 min in LIVE mode).
+
+        - Positions on exchange but NOT in internal book → added (prevents missing fills)
+        - Positions in internal book but NOT on exchange (or < 1 share) → removed (prevents phantoms)
+        - Positions in both → update shares and last_mid from authoritative exchange data
+
+        This is the same logic used at startup (_hydrate_positions_from_exchange) but
+        runs continuously so the book stays accurate even after reconnects or crashes.
+        """
+        if self.state.get("mode") != "LIVE":
+            return
+        try:
+            pos_list = adapter.get_portfolio_positions()
+        except Exception as e:
+            self._log("WARNING", f"Runtime reconcile: failed to fetch exchange positions: {e}")
+            return
+
+        if pos_list is None:
+            return
+
+        # Build a set of exchange token IDs for quick lookup
+        exchange_tokens: dict = {}
+        for p in pos_list:
+            if not isinstance(p, dict):
+                continue
+            token_id = str(p.get("asset") or p.get("asset_id") or p.get("token_id") or "")
+            if not token_id:
+                continue
+            try:
+                shares = float(p.get("size", p.get("amount", p.get("shares", 0.0))))
+            except Exception:
+                shares = 0.0
+            try:
+                cur_price = float(p.get("curPrice", p.get("avg_entry_price", 0.5)))
+            except Exception:
+                cur_price = 0.5
+            try:
+                avg_price = float(p.get("avgPrice", p.get("avg_entry_price", cur_price)))
+            except Exception:
+                avg_price = cur_price
+            exchange_tokens[token_id] = {
+                "shares": shares,
+                "last_mid": cur_price,
+                "avg_entry": avg_price,
+                "question": p.get("title", p.get("question", "")),
+            }
+
+        added = removed = updated = 0
+
+        # 1. Remove book entries that are no longer on exchange (or < 1 share)
+        for token_id in list(self.position_book.keys()):
+            if token_id not in exchange_tokens or exchange_tokens[token_id]["shares"] < 1:
+                book_shares = self.position_book[token_id].get("shares", 0)
+                self._log(
+                    "INFO",
+                    f"RECONCILE: Removing ...{token_id[-8:]} from book "
+                    f"(book={book_shares:.1f}, exchange="
+                    f"{exchange_tokens.get(token_id, {}).get('shares', 0):.1f})"
+                )
+                del self.position_book[token_id]
+                removed += 1
+
+        # 2. Update existing entries and add missing ones from exchange
+        for token_id, ex in exchange_tokens.items():
+            if ex["shares"] < 1:
+                continue  # ignore dust
+            if token_id in self.position_book:
+                # Update mark price and shares from authoritative source
+                self.position_book[token_id]["last_mid"] = ex["last_mid"]
+                self.position_book[token_id]["shares"] = ex["shares"]
+                updated += 1
+            else:
+                # Position exists on exchange but not in our book — add it
+                self._log(
+                    "INFO",
+                    f"RECONCILE: Adding missing position ...{token_id[-8:]} "
+                    f"({ex['shares']:.1f} shares @ {ex['last_mid']:.4f})"
+                )
+                self.position_book[token_id] = {
+                    "shares": ex["shares"],
+                    "last_mid": ex["last_mid"],
+                    "avg_entry": ex["avg_entry"],
+                    "opened_at": time.time(),
+                    "question": ex["question"],
+                }
+                added += 1
+
+        if added + removed + updated > 0:
+            self._log(
+                "INFO",
+                f"RECONCILE complete: +{added} added, -{removed} removed, ~{updated} updated "
+                f"({len(self.position_book)} positions total)"
+            )
+            self._recompute_equity()
+            self._save_runtime_state()
+
+
+    def _reconcile_position_book(self, adapter):
+        """
+        Reconcile internal position book against actual exchange positions.
+        Removes phantom entries that have zero shares on the exchange.
+        This prevents the negative-equity / stale-position bug.
+        """
+        if not self.position_book:
+            return
+        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+        removed = 0
+        for token_id in list(self.position_book.keys()):
+            p = self.position_book[token_id]
+            shares = float(p.get("shares", 0.0))
+            if shares > 0:
+                # Long — check actual token balance
+                try:
+                    params = BalanceAllowanceParams(
+                        asset_type=AssetType.CONDITIONAL,
+                        token_id=token_id,
+                        signature_type=adapter.signature_type
+                    )
+                    bal = adapter.client.get_balance_allowance(params)
+                    actual = int(bal.get("balance", "0")) / 1e6
+                    if actual < 1:
+                        self._log("INFO", f"RECONCILE: Removing phantom LONG ...{token_id[-8:]} (book={shares:.0f}, exchange={actual:.0f})")
+                        del self.position_book[token_id]
+                        removed += 1
+                except Exception:
+                    pass  # skip on error, will retry next cycle
+            elif shares < 0:
+                # Polymarket CLOB has no true short-selling — you can only hold tokens
+                # you own (positive balance). Any negative-share entry is a phantom
+                # produced by the old hydration sign bug. Remove it unconditionally.
+                self._log("INFO", f"RECONCILE: Removing phantom SHORT ...{token_id[-8:]} (shares={shares:.2f}) — true shorts are impossible on Polymarket CLOB")
+                del self.position_book[token_id]
+                removed += 1
+        if removed > 0:
+            self._log("INFO", f"RECONCILE: Cleaned {removed} phantom position(s)")
+            self._recompute_equity()
+            self._save_runtime_state()
 
     def _run_position_recycler(self, adapter):
         """
         Automatic position recycling logic. Called periodically from the main loop.
 
-        Two-phase approach to avoid the $0 deadlock:
+        Three-phase approach:
+          Phase 0 — RECONCILE book vs exchange (remove phantoms)
           Phase 1 — SELL longs (requires shares on exchange, NOT cash)
           Phase 2 — BUY-BACK shorts (requires cash freed from Phase 1)
         """
@@ -1253,6 +1833,10 @@ class BotController:
             return
         if not RECYCLE_ENABLED:
             return
+
+        # Phase 0: Reconcile before any trading decisions
+        self._reconcile_position_book(adapter)
+
         if not self.position_book:
             return
 
@@ -1333,7 +1917,7 @@ class BotController:
                 params = BalanceAllowanceParams(
                     asset_type=AssetType.CONDITIONAL,
                     token_id=token_id,
-                    signature_type=2
+                    signature_type=adapter.signature_type
                 )
                 adapter.client.update_balance_allowance(params)
                 bal = adapter.client.get_balance_allowance(params)
@@ -1344,9 +1928,7 @@ class BotController:
                     self.position_book.pop(token_id, None)
                     continue
 
-                sell_price = round(max(mid - 0.01, 0.01), 2)
-                if sell_price >= 1.0:
-                    sell_price = 0.99
+                sell_price = self._compute_exit_price(adapter, token_id, mid, "SELL")
                 num_shares = round(actual - 1, 0)
                 if num_shares < 1:
                     self._log("INFO", f"RECYCLER: ...{token_id[-8:]} only {actual:.0f} share on exchange, removing from book")
@@ -1360,6 +1942,15 @@ class BotController:
                 resp = adapter.place_close_order(token_id, "SELL", sell_price, num_shares)
                 if resp:
                     self._log("INFO", f"RECYCLER: Sell order placed: {resp.get('orderID', '?')[:16]}...")
+                    _ae = self.position_book.get(token_id, {}).get("avg_entry")
+                    avg_entry = _ae if _ae is not None else sell_price
+                    realized_pnl = (sell_price - avg_entry) * num_shares
+                    engine = self.exec_engine
+                    if engine is not None:
+                        engine.record_trade_result(realized_pnl)
+                        self.state["daily_pnl"] = engine.daily_pnl
+                        self.state["realized_pnl"] = float(engine.daily_pnl)
+                    self.position_book.pop(token_id, None)
 
             except Exception as e:
                 self._log("WARNING", f"RECYCLER: Failed to sell ...{token_id[-8:]}: {e}")
@@ -1377,11 +1968,11 @@ class BotController:
             age_hours = c["age"] / 3600
             reason = "expired" if c["is_expired"] else ("profitable" if c["is_profitable"] else "low cash")
 
-            buy_price = round(min(mid + 0.01, 0.99), 2)
+            buy_price = self._compute_exit_price(adapter, token_id, mid, "BUY")
             num_shares = round(abs(c["shares"]), 2)
             cost_estimate = buy_price * num_shares
 
-            if cash < 2.0:
+            if cash < max(cost_estimate + 1.0, 2.0):
                 self._log("INFO",
                     f"RECYCLER: Skipping short buy-back ...{token_id[-8:]} "
                     f"(need ~${cost_estimate:.2f}, have ${cash:.2f}). Waiting for long sells to settle."
@@ -1396,6 +1987,15 @@ class BotController:
                 resp = adapter.place_close_order(token_id, "BUY", buy_price, num_shares)
                 if resp:
                     self._log("INFO", f"RECYCLER: Buy-back order placed: {resp.get('orderID', '?')[:16]}...")
+                    _ae = self.position_book.get(token_id, {}).get("avg_entry")
+                    avg_entry = _ae if _ae is not None else buy_price
+                    realized_pnl = (avg_entry - buy_price) * num_shares
+                    engine = self.exec_engine
+                    if engine is not None:
+                        engine.record_trade_result(realized_pnl)
+                        self.state["daily_pnl"] = engine.daily_pnl
+                        self.state["realized_pnl"] = float(engine.daily_pnl)
+                    self.position_book.pop(token_id, None)
                     cash -= cost_estimate
             except Exception as e:
                 self._log("WARNING", f"RECYCLER: Failed to buy-back ...{token_id[-8:]}: {e}")
@@ -1426,4 +2026,4 @@ class BotController:
                     session.markets[0].get("question","?")[:80] if len(session.markets)>0 else "",
                     session.markets[1].get("question","?")[:80] if len(session.markets)>1 else "",
                 ])
-        except: pass
+        except Exception: pass

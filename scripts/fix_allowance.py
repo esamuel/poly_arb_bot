@@ -3,6 +3,7 @@ import sys
 import json
 from web3 import Web3
 from dotenv import load_dotenv
+from security_guard import enforce_fund_movement_guard
 
 # Load Env
 load_dotenv()
@@ -41,6 +42,7 @@ ERC20_ABI = [
 ]
 
 def main():
+    enforce_fund_movement_guard("Fix ERC20 allowance")
     print("--- Polymarket Helper: Check & Fix Allowance ---")
     
     if not PRIVATE_KEY:

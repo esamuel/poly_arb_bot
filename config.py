@@ -38,8 +38,8 @@ POLYMARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 # Bot Configuration
 EXECUTION_MODE = (_clean_env(os.getenv("EXECUTION_MODE", "PAPER")) or "PAPER").upper()  # PAPER or LIVE
 MIN_PROFIT_THRESHOLD = _get_float_env("MIN_PROFIT_THRESHOLD", "0.05")  # $0.05
-MAX_POSITION_SIZE = _get_float_env("MAX_POSITION_SIZE", "100.0")  # $100 per leg
-MAX_DAYS_TO_RESOLUTION = _get_int_env("MAX_DAYS_TO_RESOLUTION", "30")  # Near-term markets for faster turnover
+MAX_POSITION_SIZE = _get_float_env("MAX_POSITION_SIZE", "3.0")  # $3 per leg (conservative paper mode)
+MAX_DAYS_TO_RESOLUTION = _get_int_env("MAX_DAYS_TO_RESOLUTION", "14")  # Short-term markets only
 
 # Logging
 LOG_LEVEL = (_clean_env(os.getenv("LOG_LEVEL", "INFO")) or "INFO").upper()
@@ -47,6 +47,10 @@ LOG_LEVEL = (_clean_env(os.getenv("LOG_LEVEL", "INFO")) or "INFO").upper()
 # Telegram Notifications
 TELEGRAM_BOT_TOKEN = _clean_env(os.getenv("TELEGRAM_BOT_TOKEN"))
 TELEGRAM_CHAT_ID = _clean_env(os.getenv("TELEGRAM_CHAT_ID"))
+
+# Security
+ALLOW_FUND_MOVEMENTS = (_clean_env(os.getenv("ALLOW_FUND_MOVEMENTS", "0")) or "0").lower() in ("1", "true", "yes", "on")
+DASHBOARD_ALLOW_INSECURE_DEFAULTS = (_clean_env(os.getenv("DASHBOARD_ALLOW_INSECURE_DEFAULTS", "0")) or "0").lower() in ("1", "true", "yes", "on")
 
 # Validate critical config on import
 def validate_config():
@@ -64,5 +68,9 @@ def validate_config():
         msg = f"Invalid EXECUTION_MODE: '{EXECUTION_MODE}'. Must be PAPER or LIVE."
         _logger.error(msg)
         raise ValueError(msg)
+    if ALLOW_FUND_MOVEMENTS:
+        _logger.warning("ALLOW_FUND_MOVEMENTS=1. Fund transfer/swap scripts are unlocked.")
+    if DASHBOARD_ALLOW_INSECURE_DEFAULTS:
+        _logger.warning("DASHBOARD_ALLOW_INSECURE_DEFAULTS=1. Dashboard security protections are bypassed.")
 
 validate_config()

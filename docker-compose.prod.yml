@@ -8,6 +8,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - DASHBOARD_PORT=8080
+      - DASHBOARD_AUTH_DISABLED=0
     expose:
       - "8080"
     volumes:
@@ -35,6 +36,9 @@ services:
       - "443:443"
     env_file:
       - .env
+    environment:
+      - DOMAIN=${DOMAIN:-app.orbitarb.com}
+      - TLS_EMAIL=${TLS_EMAIL:-}
     volumes:
       - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

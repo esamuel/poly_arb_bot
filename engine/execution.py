@@ -1,5 +1,4 @@
 import logging
-import math
 from typing import Dict, Any, List
 import poly_arb_bot.config as cfg
 from poly_arb_bot.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
@@ -121,7 +120,7 @@ class ExecutionEngine:
                 simulated_results.append({"order": o, "response": {"status": "paper"}, "filled": False, "ok": True})
             
             # Send telegram alert even in paper mode
-            msg = f"<b>[PAPER] Arb Signal</b>\n"
+            msg = "<b>[PAPER] Arb Signal</b>\n"
             for o in orders:
                 msg += f"{o['side']} ${o['size']:.2f} @ {o['price']:.4f}\n"
             self.send_telegram_alert(msg)
@@ -129,14 +128,14 @@ class ExecutionEngine:
 
         # --- LIVE EXECUTION ---
         if not self.check_safety():
-            return
+            return []
 
         logger.info("LIVE EXECUTION STARTING...")
-        
+
         successful_orders = 0
         failed_orders = 0
         execution_results = []
-        
+
         for order in orders:
             try:
                 resp = self.adapter.place_limit_order(
@@ -151,9 +150,20 @@ class ExecutionEngine:
                     status = str(resp.get("status", "")).lower() if isinstance(resp, dict) else ""
                     taking = str(resp.get("takingAmount", "")).strip() if isinstance(resp, dict) else ""
                     making = str(resp.get("makingAmount", "")).strip() if isinstance(resp, dict) else ""
-                    # Treat only immediate matches (or explicit fill amounts) as filled inventory.
-                    filled = (status == "matched") or (bool(taking) and bool(making))
-                    execution_results.append({"order": order, "response": resp, "filled": filled, "ok": True})
+                    # Treat only immediate matches (or explicit non-zero fill amounts) as filled.
+                    try:
+                        taking_val = float(taking) if taking else 0.0
+                        making_val = float(making) if making else 0.0
+                    except ValueError:
+                        taking_val = making_val = 0.0
+                    filled = (status == "matched") or (taking_val > 0 and making_val > 0)
+                    # Capture order_id for possible unwind cancellation
+                    order_id = resp.get("orderID") or resp.get("order_id") or resp.get("id") if isinstance(resp, dict) else None
+                    execution_results.append({
+                        "order": order, "response": resp,
+                        "filled": filled, "ok": True,
+                        "order_id": order_id,
+                    })
                     self.send_telegram_alert(
                         f"<b>Order Placed!</b>\n"
                         f"Token: ...{order['token_id'][-8:]}\n"
@@ -164,34 +174,64 @@ class ExecutionEngine:
                 else:
                     failed_orders += 1
                     logger.error(f"Order Failed for ...{order['token_id'][-8:]}")
-                    execution_results.append({"order": order, "response": None, "filled": False, "ok": False})
+                    execution_results.append({
+                        "order": order, "response": None,
+                        "filled": False, "ok": False, "order_id": None,
+                    })
                     self.send_telegram_alert(
                         f"<b>Order Failed!</b>\n"
                         f"Token: ...{order['token_id'][-8:]}\n"
                         f"Reason: Null response from exchange"
                     )
-                    
+
             except Exception as e:
                 failed_orders += 1
                 logger.error(f"Execution Error: {e}", exc_info=True)
-                execution_results.append({"order": order, "response": {"error": str(e)}, "filled": False, "ok": False})
+                execution_results.append({
+                    "order": order, "response": {"error": str(e)},
+                    "filled": False, "ok": False, "order_id": None,
+                })
                 self.send_telegram_alert(f"<b>Execution Error:</b> {str(e)[:200]}")
 
         # Track trade count (even partial fills count)
         if successful_orders > 0:
             self.daily_trade_count += 1
             self._save_stats()
-        
+
         logger.info(f"Batch Complete. Successful: {successful_orders}, Failed: {failed_orders}")
-        
-        if failed_orders > 0 and successful_orders > 0:
+
+        # --- PARTIAL EXECUTION AUTO-UNWIND ---
+        # If this was a multi-leg batch and some legs failed, cancel any unfilled
+        # orders that already landed on the exchange to avoid unhedged exposure.
+        if failed_orders > 0 and successful_orders > 0 and len(orders) >= 2:
             logger.warning(
                 f"PARTIAL EXECUTION: {successful_orders}/{len(orders)} orders succeeded. "
-                f"This may leave unhedged exposure!"
+                f"Attempting to cancel unfilled legs to reduce unhedged exposure."
             )
-            self.send_telegram_alert(
-                f"<b>PARTIAL EXECUTION WARNING</b>\n"
+            cancelled_count = 0
+            for r in execution_results:
+                # Cancel orders that were placed on exchange but NOT filled
+                if r.get("ok") and not r.get("filled") and r.get("order_id"):
+                    try:
+                        cancel_resp = self.adapter.cancel_order(r["order_id"])
+                        if cancel_resp:
+                            cancelled_count += 1
+                            logger.info(
+                                f"Unwind: cancelled unfilled order {r['order_id'][:16]}... "
+                                f"(...{r['order']['token_id'][-8:]} {r['order']['side']})"
+                            )
+                    except Exception as ce:
+                        logger.warning(f"Unwind cancel failed for {r.get('order_id', '?')[:16]}: {ce}")
+
+            alert_msg = (
+                f"<b>⚠️ PARTIAL EXECUTION — AUTO-UNWIND</b>\n"
                 f"{successful_orders}/{len(orders)} legs filled.\n"
-                f"Check positions for unhedged exposure!"
+                f"Cancelled {cancelled_count} unfilled leg(s) to reduce exposure.\n"
+                f"Please verify open positions on the dashboard."
             )
+            self.send_telegram_alert(alert_msg)
+        elif failed_orders > 0 and successful_orders == 0:
+            # Complete failure — nothing to unwind
+            logger.warning(f"ALL {failed_orders} orders failed. No unhedged exposure.")
+
         return execution_results

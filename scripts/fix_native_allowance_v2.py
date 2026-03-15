@@ -4,12 +4,14 @@ import time
 from dotenv import load_dotenv
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
+from security_guard import enforce_fund_movement_guard
 
 load_dotenv()
 
 USDC_NATIVE = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
 
 def fix_native_allowance():
+    enforce_fund_movement_guard("Fix native allowance v2")
     host = "https://clob.polymarket.com"
     key = os.getenv("PRIVATE_KEY")
     creds = ApiCreds(

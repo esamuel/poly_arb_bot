@@ -2,35 +2,38 @@
 
 This setup exposes your dashboard securely at:
 
-- `https://your-domain.com`
+- `https://app.orbitarb.com`
 
 ## 1) DNS (required first)
 
 In your domain provider DNS panel, create an `A` record:
 
-- Host: your subdomain (for example `bot`)
-- Value: your droplet public IP
+- Host: `app` (for app.orbitarb.com)
+- Value: your server's public IP
 - TTL: default
 
 Example:
 
-- `bot.yourdomain.com -> 104.131.125.103`
+- `app.orbitarb.com -> YOUR_SERVER_IP`
 
 ## 2) Configure `.env` on the server
 
-Edit `/opt/poly_arb_bot/.env` and set:
+Edit `/opt/poly_arb_bot/.env` (or your project path) and set:
 
-- `DOMAIN=bot.yourdomain.com`
-- `TLS_EMAIL=you@yourdomain.com`
+- `DOMAIN=app.orbitarb.com`
+- `TLS_EMAIL=samuel.eskenasy@gmail.com`
 - strong `DASHBOARD_PASS` value
+- `DASHBOARD_AUTH_DISABLED=0` (auth is auto-enabled in production)
+- keep `DASHBOARD_ALLOW_INSECURE_DEFAULTS=0` (default; prevents weak auth startup)
+- keep `ALLOW_FUND_MOVEMENTS=0` unless you are intentionally running transfer/swap/allowance scripts
 
 ## 3) Deploy production stack
 
-On server:
+On your server (copy the project first, e.g. via git clone or rsync):
 
 ```bash
-cd /opt/poly_arb_bot
-bash deploy_production.sh
+cd /path/to/poly_arb_bot   # e.g. /opt/poly_arb_bot
+sudo bash deploy_production.sh
 ```
 
 This will:
@@ -49,7 +52,9 @@ docker compose -f docker-compose.prod.yml logs -f polybot
 
 Then open:
 
-- `https://bot.yourdomain.com`
+- `https://app.orbitarb.com`
+
+Login: `admin` / your `DASHBOARD_PASS` from .env
 
 ## 5) Update later
 

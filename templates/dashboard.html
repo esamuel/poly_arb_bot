@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -18,19 +19,71 @@
         }
     </script>
     <style>
-        body { background: #0a0e17; font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace; }
-        .glow-green { box-shadow: 0 0 15px rgba(34,197,94,0.3); }
-        .glow-red { box-shadow: 0 0 15px rgba(239,68,68,0.3); }
-        .glow-blue { box-shadow: 0 0 15px rgba(59,130,246,0.2); }
-        .pulse { animation: pulse 2s infinite; }
-        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
-        .log-scroll { max-height: 300px; overflow-y: auto; }
-        .log-scroll::-webkit-scrollbar { width: 6px; }
-        .log-scroll::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
-        .fade-in { animation: fadeIn 0.3s ease-in; }
-        @keyframes fadeIn { from{opacity:0;transform:translateY(5px)} to{opacity:1;transform:translateY(0)} }
+        body {
+            background: #0a0e17;
+            font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+        }
+
+        .glow-green {
+            box-shadow: 0 0 15px rgba(34, 197, 94, 0.3);
+        }
+
+        .glow-red {
+            box-shadow: 0 0 15px rgba(239, 68, 68, 0.3);
+        }
+
+        .glow-blue {
+            box-shadow: 0 0 15px rgba(59, 130, 246, 0.2);
+        }
+
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1
+            }
+
+            50% {
+                opacity: 0.5
+            }
+        }
+
+        .log-scroll {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .log-scroll::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .log-scroll::-webkit-scrollbar-thumb {
+            background: #374151;
+            border-radius: 3px;
+        }
+
+        .fade-in {
+            animation: fadeIn 0.3s ease-in;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(5px)
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0)
+            }
+        }
     </style>
 </head>
+
 <body class="text-gray-300 min-h-screen">
     <div class="max-w-7xl mx-auto px-4 py-6">
         <!-- Header -->
@@ -50,22 +103,26 @@
 
         <!-- Controls Row -->
         <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-            <button onclick="startBot()" id="btn-start" class="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg transition-all disabled:opacity-40 disabled:cursor-not-allowed">
+            <button onclick="startBot()" id="btn-start"
+                class="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg transition-all disabled:opacity-40 disabled:cursor-not-allowed">
                 START BOT
             </button>
-            <button onclick="stopBot()" id="btn-stop" class="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg transition-all disabled:opacity-40 disabled:cursor-not-allowed">
+            <button onclick="stopBot()" id="btn-stop"
+                class="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg transition-all disabled:opacity-40 disabled:cursor-not-allowed">
                 STOP BOT
             </button>
-            <button onclick="toggleMode()" id="btn-mode" class="bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-6 rounded-lg transition-all">
+            <button onclick="toggleMode()" id="btn-mode"
+                class="bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-6 rounded-lg transition-all">
                 SWITCH TO PAPER
             </button>
-            <button onclick="openSettings()" class="bg-dark-600 hover:bg-dark-700 text-gray-300 font-bold py-3 px-6 rounded-lg border border-gray-700 transition-all">
+            <button onclick="openSettings()"
+                class="bg-dark-600 hover:bg-dark-700 text-gray-300 font-bold py-3 px-6 rounded-lg border border-gray-700 transition-all">
                 SETTINGS
             </button>
         </div>
 
         <!-- Stats Cards -->
-        <div class="grid grid-cols-2 md:grid-cols-9 gap-4 mb-6">
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
             <div class="bg-dark-700 rounded-xl p-4 border border-gray-800">
                 <p class="text-gray-500 text-xs uppercase">Uptime</p>
                 <p id="stat-uptime" class="text-xl font-bold text-white mt-1">--</p>
@@ -82,27 +139,78 @@
                 <p class="text-gray-500 text-xs uppercase">Trades Executed</p>
                 <p id="stat-trades" class="text-xl font-bold text-purple-400 mt-1">0</p>
             </div>
-            <div class="bg-dark-700 rounded-xl p-4 border border-gray-800">
-                <p class="text-gray-500 text-xs uppercase">Wallet Balance</p>
+        </div>
+
+        <!-- Portfolio Stats (live from Polymarket) -->
+        <div class="grid grid-cols-2 md:grid-cols-6 gap-4 mb-6">
+            <div class="bg-dark-700 rounded-xl p-4 border border-cyan-900/40">
+                <p class="text-gray-500 text-xs uppercase">Cash Balance</p>
                 <p id="stat-balance" class="text-xl font-bold text-green-400 mt-1">--</p>
             </div>
-            <div class="bg-dark-700 rounded-xl p-4 border border-gray-800">
-                <p class="text-gray-500 text-xs uppercase">Reserved (Live Orders Est)</p>
-                <p id="stat-reserved" class="text-xl font-bold text-amber-300 mt-1">--</p>
-                <p id="stat-live-orders" class="text-[10px] text-gray-500 mt-1">Open orders: 0</p>
+            <div class="bg-dark-700 rounded-xl p-4 border border-cyan-900/40">
+                <p class="text-gray-500 text-xs uppercase">Positions Value</p>
+                <p id="stat-pos-value" class="text-xl font-bold text-white mt-1">--</p>
+                <p id="stat-open-pos" class="text-[10px] text-gray-500 mt-1">0 positions</p>
             </div>
-            <div class="bg-dark-700 rounded-xl p-4 border border-gray-800">
-                <p class="text-gray-500 text-xs uppercase">Net Equity (Est)</p>
+            <div class="bg-dark-700 rounded-xl p-4 border border-cyan-900/40">
+                <p class="text-gray-500 text-xs uppercase">Portfolio Total</p>
                 <p id="stat-equity" class="text-xl font-bold text-cyan-400 mt-1">--</p>
-                <p id="stat-open-pos" class="text-[10px] text-gray-500 mt-1">Open pos: 0</p>
             </div>
-            <div class="bg-dark-700 rounded-xl p-4 border border-gray-800">
+            <div class="bg-dark-700 rounded-xl p-4 border border-cyan-900/40">
+                <p class="text-gray-500 text-xs uppercase">Unrealized PnL</p>
+                <p id="stat-unrealized" class="text-xl font-bold text-white mt-1">--</p>
+            </div>
+            <div class="bg-dark-700 rounded-xl p-4 border border-cyan-900/40">
                 <p class="text-gray-500 text-xs uppercase">Realized PnL</p>
                 <p id="stat-realized" class="text-xl font-bold text-white mt-1">--</p>
             </div>
-            <div class="bg-dark-700 rounded-xl p-4 border border-gray-800">
-                <p class="text-gray-500 text-xs uppercase">Unrealized PnL (Est)</p>
-                <p id="stat-unrealized" class="text-xl font-bold text-white mt-1">--</p>
+            <div class="bg-dark-700 rounded-xl p-4 border border-cyan-900/40">
+                <p class="text-gray-500 text-xs uppercase">Open Orders</p>
+                <p id="stat-reserved" class="text-xl font-bold text-amber-300 mt-1">--</p>
+                <p id="stat-live-orders" class="text-[10px] text-gray-500 mt-1">0 orders</p>
+            </div>
+        </div>
+
+        <!-- Polymarket Portfolio (Live from exchange) -->
+        <div class="bg-dark-700 rounded-xl border border-gray-800 p-4 mb-6">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-white font-bold flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-cyan-400"></span>
+                    Polymarket Portfolio
+                    <span class="text-xs text-gray-500 font-normal">(live from exchange)</span>
+                </h2>
+                <div class="flex items-center gap-4 text-sm">
+                    <span class="text-gray-500">Cash: <span id="pf-cash" class="text-white font-bold">--</span></span>
+                    <span class="text-gray-500">Positions: <span id="pf-pos-val"
+                            class="text-white font-bold">--</span></span>
+                    <span class="text-gray-500">Total: <span id="pf-total"
+                            class="text-cyan-400 font-bold">--</span></span>
+                    <span class="text-gray-500">PnL: <span id="pf-pnl" class="font-bold">--</span></span>
+                    <button onclick="fetchPortfolio()" class="px-3 py-1 bg-dark-600 hover:bg-dark-600/80 text-gray-400 text-xs rounded border border-gray-700 transition-all">Refresh</button>
+                </div>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-xs">
+                    <thead>
+                        <tr class="text-gray-500 border-b border-gray-800">
+                            <th class="text-left py-2 px-2">Market</th>
+                            <th class="text-center py-2 px-1">Side</th>
+                            <th class="text-right py-2 px-1">Shares</th>
+                            <th class="text-right py-2 px-1">Avg Entry</th>
+                            <th class="text-right py-2 px-1">Current</th>
+                            <th class="text-right py-2 px-1">Value</th>
+                            <th class="text-right py-2 px-1">PnL</th>
+                            <th class="text-right py-2 px-1">PnL %</th>
+                            <th class="text-center py-2 px-1">Ends</th>
+                            <th class="text-center py-2 px-1">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="pf-positions">
+                        <tr>
+                            <td colspan="10" class="text-gray-500 text-center py-4">Loading portfolio...</td>
+                        </tr>
+                    </tbody>
+                </table>
             </div>
         </div>
 
@@ -155,21 +263,27 @@
     </div>
 
     <!-- Settings Modal -->
-    <div id="settings-modal" class="fixed inset-0 bg-black/70 hidden items-center justify-center z-50" onclick="if(event.target===this)closeSettings()">
+    <div id="settings-modal" class="fixed inset-0 bg-black/70 hidden items-center justify-center z-50"
+        onclick="if(event.target===this)closeSettings()">
         <div class="bg-dark-700 rounded-2xl p-6 w-full max-w-md border border-gray-700">
             <h2 class="text-white font-bold text-lg mb-4">Bot Settings</h2>
             <div class="space-y-4">
                 <div>
                     <label class="text-gray-400 text-sm">Min Profit Threshold ($)</label>
-                    <input id="set-threshold" type="number" step="0.01" class="w-full mt-1 px-3 py-2 bg-dark-800 border border-gray-600 rounded-lg text-white focus:border-blue-500 focus:outline-none">
+                    <input id="set-threshold" type="number" step="0.01"
+                        class="w-full mt-1 px-3 py-2 bg-dark-800 border border-gray-600 rounded-lg text-white focus:border-blue-500 focus:outline-none">
                 </div>
                 <div>
                     <label class="text-gray-400 text-sm">Max Position Size ($)</label>
-                    <input id="set-position" type="number" step="1" class="w-full mt-1 px-3 py-2 bg-dark-800 border border-gray-600 rounded-lg text-white focus:border-blue-500 focus:outline-none">
+                    <input id="set-position" type="number" step="1"
+                        class="w-full mt-1 px-3 py-2 bg-dark-800 border border-gray-600 rounded-lg text-white focus:border-blue-500 focus:outline-none">
                 </div>
+                <p class="text-gray-500 text-xs mt-2">Recycler (RECYCLE_* env vars) applies on restart.</p>
                 <div class="flex gap-3 mt-6">
-                    <button onclick="saveSettings()" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 rounded-lg transition-all">Save</button>
-                    <button onclick="closeSettings()" class="flex-1 bg-dark-600 hover:bg-dark-800 text-gray-300 font-bold py-2 rounded-lg border border-gray-600 transition-all">Cancel</button>
+                    <button onclick="saveSettings()"
+                        class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 rounded-lg transition-all">Save</button>
+                    <button onclick="closeSettings()"
+                        class="flex-1 bg-dark-600 hover:bg-dark-800 text-gray-300 font-bold py-2 rounded-lg border border-gray-600 transition-all">Cancel</button>
                 </div>
             </div>
         </div>
@@ -178,6 +292,111 @@
     <script>
         let currentMode = "LIVE";
         let polling = null;
+        let portfolioPolling = null;
+
+        async function fetchPortfolio() {
+            try {
+                const resp = await fetch("/api/portfolio");
+                if (resp.status === 401) return;
+                const d = await resp.json();
+                if (d.error) {
+                    document.getElementById("pf-positions").innerHTML = `<tr><td colspan="10" class="text-amber-400 text-center py-4">Portfolio: ${d.error}</td></tr>`;
+                    return;
+                }
+                updatePortfolio(d);
+            } catch (e) {
+                document.getElementById("pf-positions").innerHTML = `<tr><td colspan="10" class="text-amber-400 text-center py-4">Portfolio: Connection error</td></tr>`;
+                console.error("Portfolio fetch error:", e);
+            }
+        }
+
+        async function closePosition(btn) {
+            const tokenId = btn.getAttribute("data-token-id");
+            const title = btn.getAttribute("data-title") || "...";
+            if (!tokenId || !confirm(`Close position: ${title}?`)) return;
+            btn.disabled = true;
+            try {
+                const resp = await fetch("/api/close_position", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ token_id: tokenId })
+                });
+                const r = await resp.json();
+                if (r.ok) {
+                    btn.textContent = "Sent";
+                    btn.className = "px-2 py-1 bg-green-600/30 text-green-400 text-[10px] rounded";
+                    fetchPortfolio();
+                } else {
+                    alert(r.msg || "Close failed");
+                    btn.disabled = false;
+                }
+            } catch (e) {
+                alert("Close failed: " + e.message);
+                btn.disabled = false;
+            }
+        }
+
+        function updatePortfolio(d) {
+            // Portfolio summary bar
+            document.getElementById("pf-cash").textContent = `$${(d.cash_balance || 0).toFixed(2)}`;
+            document.getElementById("pf-pos-val").textContent = `$${(d.total_current_value || 0).toFixed(2)}`;
+            document.getElementById("pf-total").textContent = `$${(d.portfolio_value || 0).toFixed(2)}`;
+
+            const pnlTotal = (d.total_unrealized_pnl || 0) + (d.total_realized_pnl || 0);
+            const pnlEl = document.getElementById("pf-pnl");
+            pnlEl.textContent = `${pnlTotal >= 0 ? '+' : ''}$${pnlTotal.toFixed(4)}`;
+            pnlEl.className = `font-bold ${pnlTotal >= 0 ? 'text-green-400' : 'text-red-400'}`;
+
+            // Stat cards -- fed from Polymarket data so they match the website
+            document.getElementById("stat-balance").textContent = `$${(d.cash_balance || 0).toFixed(2)}`;
+            document.getElementById("stat-pos-value").textContent = `$${(d.total_current_value || 0).toFixed(2)}`;
+            document.getElementById("stat-open-pos").textContent = `${d.num_positions || 0} positions`;
+            document.getElementById("stat-equity").textContent = `$${(d.portfolio_value || 0).toFixed(2)}`;
+
+            const unrealized = d.total_unrealized_pnl || 0;
+            const realized = d.total_realized_pnl || 0;
+            const rEl = document.getElementById("stat-realized");
+            const uEl = document.getElementById("stat-unrealized");
+            rEl.textContent = `${realized >= 0 ? '+' : ''}$${realized.toFixed(2)}`;
+            uEl.textContent = `${unrealized >= 0 ? '+' : ''}$${unrealized.toFixed(4)}`;
+            rEl.className = `text-xl font-bold mt-1 ${realized >= 0 ? 'text-green-400' : 'text-red-400'}`;
+            uEl.className = `text-xl font-bold mt-1 ${unrealized >= 0 ? 'text-green-400' : 'text-red-400'}`;
+
+            const tbody = document.getElementById("pf-positions");
+            if (!d.positions || d.positions.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="10" class="text-gray-500 text-center py-4">No open positions</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = d.positions.map(p => {
+                const pnlColor = p.cash_pnl >= 0 ? 'text-green-400' : 'text-red-400';
+                const pctColor = p.percent_pnl >= 0 ? 'text-green-400' : 'text-red-400';
+                const outcomeColor = p.outcome === 'Yes' ? 'bg-green-600/20 text-green-400' : 'bg-red-600/20 text-red-400';
+                const safeTitle = (p.title || '').replace(/['"<>]/g, '').substring(0, 40);
+                const closeBtn = p.token_id ? `<button data-token-id="${p.token_id}" data-title="${safeTitle}" onclick="closePosition(this)" class="px-2 py-1 bg-red-600/30 hover:bg-red-600/50 text-red-400 text-[10px] rounded transition-all hover:scale-105">Close</button>` : '';
+                return `
+                    <tr class="border-b border-gray-800/50 hover:bg-dark-600/30">
+                        <td class="py-2 px-2">
+                            <div class="flex items-center gap-2">
+                                ${p.icon ? `<img src="${p.icon}" class="w-5 h-5 rounded" onerror="this.style.display='none'">` : ''}
+                                <span class="text-gray-300 truncate max-w-[280px]" title="${p.title}">${p.title}</span>
+                            </div>
+                        </td>
+                        <td class="text-center py-2 px-1">
+                            <span class="px-2 py-0.5 rounded text-[10px] font-bold ${outcomeColor}">${p.outcome}</span>
+                        </td>
+                        <td class="text-right py-2 px-1 text-gray-300">${p.size}</td>
+                        <td class="text-right py-2 px-1 text-gray-400">$${p.avg_price.toFixed(4)}</td>
+                        <td class="text-right py-2 px-1 text-white font-medium">$${p.cur_price.toFixed(4)}</td>
+                        <td class="text-right py-2 px-1 text-white">$${p.current_value.toFixed(2)}</td>
+                        <td class="text-right py-2 px-1 ${pnlColor} font-medium">${p.cash_pnl >= 0 ? '+' : ''}$${p.cash_pnl.toFixed(4)}</td>
+                        <td class="text-right py-2 px-1 ${pctColor}">${p.percent_pnl >= 0 ? '+' : ''}${p.percent_pnl.toFixed(2)}%</td>
+                        <td class="text-center py-2 px-1 text-gray-500">${p.end_date || '--'}</td>
+                        <td class="text-center py-2 px-1">${closeBtn}</td>
+                    </tr>
+                `;
+            }).join("");
+        }
 
         function formatUptime(secs) {
             if (!secs) return "--";
@@ -206,52 +425,63 @@
             const txt = document.getElementById("status-text");
             const badge = document.getElementById("status-badge");
             txt.textContent = d.status.toUpperCase();
-            
+
             if (d.status === "running") {
                 dot.className = "w-3 h-3 rounded-full bg-green-400 pulse";
-                badge.className = "flex items-center gap-2 px-4 py-2 rounded-lg bg-dark-700 glow-green";
+                badge.className = "flex items-center gap-2 px-4 py-2 rounded-lg bg-dark-700 glow-green border border-green-500/20";
+            } else if (d.status === "scanning") {
+                dot.className = "w-3 h-3 rounded-full bg-blue-400 pulse";
+                badge.className = "flex items-center gap-2 px-4 py-2 rounded-lg bg-dark-700 glow-blue border border-blue-500/20";
             } else if (d.status === "starting") {
                 dot.className = "w-3 h-3 rounded-full bg-yellow-400 pulse";
-                badge.className = "flex items-center gap-2 px-4 py-2 rounded-lg bg-dark-700";
+                badge.className = "flex items-center gap-2 px-4 py-2 rounded-lg bg-dark-700 border border-yellow-500/20";
             } else if (d.status === "error") {
                 dot.className = "w-3 h-3 rounded-full bg-red-400";
-                badge.className = "flex items-center gap-2 px-4 py-2 rounded-lg bg-dark-700 glow-red";
+                badge.className = "flex items-center gap-2 px-4 py-2 rounded-lg bg-dark-700 glow-red border border-red-500/20";
             } else {
                 dot.className = "w-3 h-3 rounded-full bg-gray-500";
-                badge.className = "flex items-center gap-2 px-4 py-2 rounded-lg bg-dark-700";
+                badge.className = "flex items-center gap-2 px-4 py-2 rounded-lg bg-dark-700 border border-gray-600/20";
             }
 
             // Mode badge
             currentMode = d.mode;
             const mb = document.getElementById("mode-badge");
             mb.textContent = d.mode;
-            mb.className = d.mode === "LIVE" 
-                ? "px-3 py-1 rounded text-xs font-bold bg-red-600 text-white"
+            mb.className = d.mode === "LIVE"
+                ? "px-3 py-1 rounded text-xs font-bold bg-red-600 text-white shadow-[0_0_10px_rgba(239,68,68,0.4)]"
                 : "px-3 py-1 rounded text-xs font-bold bg-yellow-600 text-black";
             document.getElementById("btn-mode").textContent = d.mode === "LIVE" ? "SWITCH TO PAPER" : "SWITCH TO LIVE";
 
-            // Buttons
-            document.getElementById("btn-start").disabled = (d.status === "running" || d.status === "starting");
-            document.getElementById("btn-stop").disabled = (d.status === "stopped");
+            // Buttons - Improved visual feedback
+            const isWorking = ["running", "scanning", "starting"].includes(d.status);
+            const btnStart = document.getElementById("btn-start");
+            const btnStop = document.getElementById("btn-stop");
 
-            // Stats
+            btnStart.disabled = isWorking;
+            if (isWorking) {
+                btnStart.textContent = "BOT IS ACTIVE";
+                btnStart.className = "bg-dark-600 text-gray-500 font-bold py-3 px-6 rounded-lg transition-all cursor-not-allowed opacity-50 border border-gray-700";
+            } else {
+                btnStart.textContent = "START BOT";
+                btnStart.className = "bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg transition-all shadow-lg glow-green hover:scale-[1.02]";
+            }
+
+            btnStop.disabled = d.status === "stopped";
+            if (btnStop.disabled) {
+                btnStop.className = "bg-dark-600 text-gray-500 font-bold py-3 px-6 rounded-lg transition-all cursor-not-allowed opacity-30 border border-gray-700";
+            } else {
+                btnStop.className = "bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg transition-all shadow-lg glow-red hover:scale-[1.02]";
+            }
+
+            // Bot stats (non-financial)
             document.getElementById("stat-uptime").textContent = formatUptime(d.uptime);
             document.getElementById("stat-pairs").textContent = d.pairs_monitored;
             document.getElementById("stat-opps").textContent = d.opportunities_found;
             document.getElementById("stat-trades").textContent = d.trades_executed;
-            document.getElementById("stat-balance").textContent = d.wallet_balance !== null ? `$${d.wallet_balance.toFixed(2)}` : "--";
+
+            // Open orders from bot state (only order count / reserved)
             document.getElementById("stat-reserved").textContent = `$${(d.reserved_in_live_orders_estimate || 0).toFixed(2)}`;
-            document.getElementById("stat-live-orders").textContent = `Open orders: ${d.live_orders_count || 0}`;
-            document.getElementById("stat-equity").textContent = d.net_equity_estimate !== null ? `$${d.net_equity_estimate.toFixed(2)}` : "--";
-            document.getElementById("stat-open-pos").textContent = `Open pos: ${d.open_positions_count || 0} | Pos MTM: $${(d.position_value_estimate || 0).toFixed(2)}`;
-            const realized = d.realized_pnl ?? d.daily_pnl ?? 0;
-            const unrealized = d.unrealized_pnl_estimate ?? 0;
-            const rEl = document.getElementById("stat-realized");
-            const uEl = document.getElementById("stat-unrealized");
-            rEl.textContent = `${realized >= 0 ? '+' : '-'}$${Math.abs(realized).toFixed(2)}`;
-            uEl.textContent = `${unrealized >= 0 ? '+' : '-'}$${Math.abs(unrealized).toFixed(2)}`;
-            rEl.className = `text-xl font-bold mt-1 ${realized >= 0 ? 'text-green-400' : 'text-red-400'}`;
-            uEl.className = `text-xl font-bold mt-1 ${unrealized >= 0 ? 'text-green-400' : 'text-red-400'}`;
+            document.getElementById("stat-live-orders").textContent = `${d.live_orders_count || 0} orders`;
 
             // Opportunities
             const oppDiv = document.getElementById("opportunities-list");
@@ -260,7 +490,7 @@
                     <div class="bg-dark-800 rounded-lg p-2 text-xs fade-in">
                         <div class="flex justify-between">
                             <span class="text-gray-500">${o.time}</span>
-                            <span class="font-bold ${o.profit > 0.08 ? 'text-green-400' : 'text-yellow-400'}">$${o.profit.toFixed(4)}</span>
+                            <span class="font-bold ${o.profit > 0.08 ? 'text-green-400' : 'text-yellow-400'}">${(o.profit * 100).toFixed(2)}% edge</span>
                         </div>
                         <div class="text-gray-400 mt-1 truncate">${o.markets.join(' vs ')}</div>
                     </div>
@@ -290,6 +520,20 @@
                         <div class="text-gray-500 mt-1">Prices: [${s.prices.map(p => p.toFixed(3)).join(', ')}] | Tokens: ${s.num_tokens} | Last trade: ${s.last_trade}</div>
                     </div>
                 `).join("");
+            } else {
+                if (d.status === "scanning") {
+                    pDiv.innerHTML = `
+                        <div class="flex flex-col items-center justify-center py-8 text-center space-y-3">
+                            <div class="w-8 h-8 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin"></div>
+                            <p class="text-blue-400 text-sm animate-pulse">Searching for arbitrage market pairs...</p>
+                            <p class="text-gray-500 text-[10px] max-w-[250px]">LLM scanning 500+ markets for pricing dependencies.</p>
+                        </div>
+                    `;
+                } else if (d.status === "running") {
+                    pDiv.innerHTML = `<p class="text-gray-500 text-sm italic py-4 text-center">No profitable pairs identified yet.</p>`;
+                } else {
+                    pDiv.innerHTML = `<p class="text-gray-500 text-sm italic py-4 text-center">Bot not active.</p>`;
+                }
             }
 
             // Logs
@@ -318,7 +562,7 @@
             if (newMode === "LIVE" && !confirm("Switch to LIVE mode? Real orders will be placed.")) return;
             fetch("/api/settings", {
                 method: "POST",
-                headers: {"Content-Type": "application/json"},
+                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ mode: newMode })
             }).then(() => fetchState());
         }
@@ -344,14 +588,17 @@
             };
             fetch("/api/settings", {
                 method: "POST",
-                headers: {"Content-Type": "application/json"},
+                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(data)
             }).then(() => { closeSettings(); fetchState(); });
         }
 
-        // Poll every 3 seconds
+        // Poll bot state every 3 seconds, portfolio every 15 seconds
         fetchState();
+        fetchPortfolio();
         polling = setInterval(fetchState, 3000);
+        portfolioPolling = setInterval(fetchPortfolio, 15000);
     </script>
 </body>
+
 </html>

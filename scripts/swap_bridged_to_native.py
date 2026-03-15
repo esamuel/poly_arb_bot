@@ -2,6 +2,7 @@ from web3 import Web3
 import os
 import time
 from dotenv import load_dotenv
+from security_guard import enforce_fund_movement_guard
 
 load_dotenv()
 
@@ -44,6 +45,7 @@ ROUTER_ABI = [
 ]
 
 def swap_back():
+    enforce_fund_movement_guard("Swap Bridged USDC -> Native USDC")
     print("--- Swapping Bridged USDC to Native USDC ---")
     w3 = Web3(Web3.HTTPProvider(RPC_URL))
     account = w3.eth.account.from_key(PRIVATE_KEY)

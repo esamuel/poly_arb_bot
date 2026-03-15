@@ -3,6 +3,7 @@ import os
 import time
 from web3 import Web3
 from dotenv import load_dotenv
+from security_guard import enforce_fund_movement_guard
 
 load_dotenv()
 
@@ -17,6 +18,7 @@ w3 = Web3(Web3.HTTPProvider("https://polygon-bor.publicnode.com"))
 pkey = os.getenv("PRIVATE_KEY")
 
 def approve():
+    enforce_fund_movement_guard("Approve NegRisk exchange allowance")
     print(f"Approving Exchange {EXCHANGE_NEG} for Native USDC...")
     
     contract = w3.eth.contract(address=Web3.to_checksum_address(USDC_NATIVE), abi=ABI)

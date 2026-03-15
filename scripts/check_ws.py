@@ -11,11 +11,23 @@ import requests
 
 def on_open(ws):
     print("Opened")
-    # Fetch Top Market Token
+    # Fetch one active market token
     try:
-        url = "https://gamma-api.polymarket.com/markets?limit=1&active=true&closed=false&order=volumeNum24hr"
-        resp = requests.get(url).json()
-        token = json.loads(resp[0]["clobTokenIds"])[0]
+        url = "https://gamma-api.polymarket.com/markets?limit=5&active=true&closed=false"
+        resp = requests.get(url, timeout=15).json()
+        token = None
+        for market in resp:
+            raw = market.get("clobTokenIds", [])
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except Exception:
+                    raw = []
+            if isinstance(raw, list) and raw:
+                token = raw[0]
+                break
+        if not token:
+            raise RuntimeError("No valid market token found")
         print(f"Subscribing to Top Volume Token: {token}")
         
         msg = {

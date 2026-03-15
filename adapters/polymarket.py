@@ -6,7 +6,7 @@ import logging
 import time
 import re
 import os
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from datetime import datetime
 
 from py_clob_client.client import ClobClient
@@ -142,10 +142,102 @@ class PolymarketAdapter:
             except Exception as e:
                 logger.error(f"Failed to init ClobClient: {e}")
 
+    # --- LIVE PORTFOLIO (Data API) ---
+
+    def get_portfolio_positions(self) -> List[Dict[str, Any]]:
+        """Fetch actual positions from Polymarket Data API (the same data shown on polymarket.com)."""
+        address = self.proxy_address or ""
+        if not address:
+            logger.warning("No PROXY_ADDRESS configured; cannot fetch portfolio.")
+            return []
+        url = "https://data-api.polymarket.com/positions"
+        try:
+            resp = requests.get(url, params={"user": address, "sizeThreshold": "0"}, timeout=15)
+            resp.raise_for_status()
+            positions = resp.json()
+            if not isinstance(positions, list):
+                return []
+            return positions
+        except Exception as e:
+            logger.error(f"Error fetching portfolio from data API: {e}")
+            return []
+
+    def get_portfolio_summary(self) -> Dict[str, Any]:
+        """Build a portfolio summary identical to what polymarket.com shows."""
+        positions = self.get_portfolio_positions()
+        balance_info = self.get_balance_allowance()
+        cash = float(balance_info.get("balance", "0")) / 1e6 if balance_info else 0.0
+
+        total_invested = 0.0
+        total_current = 0.0
+        total_pnl = 0.0
+        total_realized = 0.0
+        formatted = []
+
+        for p in positions:
+            size = float(p.get("size", 0))
+            if size < 0.001:
+                continue
+            avg_price = float(p.get("avgPrice", 0))
+            cur_price = float(p.get("curPrice", 0))
+            initial_value = float(p.get("initialValue", 0))
+            current_value = float(p.get("currentValue", 0))
+            cash_pnl = float(p.get("cashPnl", 0))
+            realized_pnl = float(p.get("realizedPnl", 0))
+            pct_pnl = float(p.get("percentPnl", 0))
+
+            total_invested += initial_value
+            total_current += current_value
+            total_pnl += cash_pnl
+            total_realized += realized_pnl
+
+            token_id = str(p.get("asset_id") or p.get("asset") or p.get("token_id") or "")
+            formatted.append({
+                "token_id": token_id,
+                "title": p.get("title", "Unknown"),
+                "outcome": p.get("outcome", "?"),
+                "slug": p.get("slug", ""),
+                "icon": p.get("icon", ""),
+                "size": round(size, 2),
+                "avg_price": round(avg_price, 4),
+                "cur_price": round(cur_price, 4),
+                "initial_value": round(initial_value, 2),
+                "current_value": round(current_value, 2),
+                "cash_pnl": round(cash_pnl, 4),
+                "realized_pnl": round(realized_pnl, 4),
+                "percent_pnl": round(pct_pnl, 2),
+                "redeemable": p.get("redeemable", False),
+                "end_date": p.get("endDate", ""),
+            })
+
+        formatted.sort(key=lambda x: abs(x["current_value"]), reverse=True)
+
+        return {
+            "cash_balance": round(cash, 2),
+            "total_invested": round(total_invested, 2),
+            "total_current_value": round(total_current, 2),
+            "total_unrealized_pnl": round(total_pnl, 4),
+            "total_realized_pnl": round(total_realized, 4),
+            "portfolio_value": round(cash + total_current, 2),
+            "num_positions": len(formatted),
+            "positions": formatted,
+        }
+
     # --- MARKET DATA ---
 
+    # Minimum 24h volume (USD) to consider a market tradeable.
+    MIN_VOLUME_24H = float(os.getenv("MIN_VOLUME_24H", "100"))
+    # Maximum bid-ask spread % to consider a market liquid enough.
+    MAX_SPREAD_FILTER = float(os.getenv("MAX_SPREAD_FILTER", "0.50"))
+
     def get_markets(self, limit: int = 200) -> List[Dict[str, Any]]:
-        """Fetch active markets via Gamma API with robust filtering."""
+        """Fetch active markets via Gamma API with robust filtering.
+        
+        Improvements (2026-02-18):
+        - Volume filter: skip markets with < $100/day volume (illiquid, orders won't fill)
+        - Spread filter: skip markets with bid-ask spread > 50% of mid (fee-eaters)
+        - Capture volume & spread metadata for downstream opportunity scoring
+        """
         gamma_url = "https://gamma-api.polymarket.com/markets"
         params = {"limit": limit, "active": "true", "closed": "false"}
         try:
@@ -154,6 +246,8 @@ class PolymarketAdapter:
             raw_markets = response.json()
             
             cleaned_markets = []
+            skipped_volume = 0
+            skipped_spread = 0
             current_year = datetime.now().year
             now_utc = datetime.utcnow()
             
@@ -162,24 +256,24 @@ class PolymarketAdapter:
                 t_ids = m.get("clobTokenIds")
                 if isinstance(t_ids, str):
                     try: t_ids = json.loads(t_ids)
-                    except: continue
-                
+                    except (json.JSONDecodeError, ValueError): continue
+
                 if not t_ids or not isinstance(t_ids, list) or len(t_ids) < 2:
                     continue
                 m["clobTokenIds"] = t_ids
-                
+
                 # Parse outcomes properly
                 outcomes = m.get("outcomes")
                 if isinstance(outcomes, str):
                     try: outcomes = json.loads(outcomes)
-                    except: outcomes = ["No", "Yes"]
+                    except (json.JSONDecodeError, ValueError): outcomes = ["No", "Yes"]
                     m["outcomes"] = outcomes
 
                 # Parse outcomePrices properly
                 op = m.get("outcomePrices")
                 if isinstance(op, str):
                     try: op = json.loads(op)
-                    except: op = None
+                    except (json.JSONDecodeError, ValueError): op = None
                     m["outcomePrices"] = op
 
                 # Date filter: only markets from recent years (dynamic, not hardcoded)
@@ -194,7 +288,6 @@ class PolymarketAdapter:
 
                 # Resolution horizon filter:
                 # keep only markets expected to resolve within MAX_DAYS_TO_RESOLUTION days.
-                # This avoids stale/very long-dated markets and improves capital turnover.
                 end_raw = (
                     m.get("endDate")
                     or m.get("end_date_iso")
@@ -202,24 +295,23 @@ class PolymarketAdapter:
                     or m.get("end_date")
                     or ""
                 )
+                days_to_end = None
                 if end_raw:
                     try:
                         end_dt = datetime.fromisoformat(str(end_raw).replace("Z", "+00:00")).replace(tzinfo=None)
                         days_to_end = (end_dt - now_utc).days
-                        # Skip already-ended markets and too-far markets.
                         if days_to_end < 0:
                             continue
                         if days_to_end > MAX_DAYS_TO_RESOLUTION:
                             continue
                     except Exception:
-                        # If end date is malformed, skip to stay conservative.
                         continue
                 
                 # Must have valid question
                 if not m.get("question"):
                     continue
                 question = str(m.get("question", ""))
-                # Exclude markets explicitly tied to past calendar years in the title/question.
+                # Exclude markets explicitly tied to past calendar years
                 years_in_question = [int(y) for y in re.findall(r"\b(20\d{2})\b", question)]
                 if years_in_question and max(years_in_question) < current_year:
                     continue
@@ -229,12 +321,38 @@ class PolymarketAdapter:
                 best_ask = float(m.get("bestAsk", 0) or 0)
                 if best_bid == 0 and best_ask == 0:
                     continue
+
+                # --- NEW: Volume filter ---
+                vol_raw = m.get("volume24hr") or m.get("volume") or m.get("volumeNum") or 0
+                try:
+                    volume_24h = float(vol_raw)
+                except (TypeError, ValueError):
+                    volume_24h = 0.0
+                if volume_24h < self.MIN_VOLUME_24H:
+                    skipped_volume += 1
+                    continue
+                m["_volume_24h"] = volume_24h  # attach for downstream scoring
+
+                # --- NEW: Spread filter ---
+                if best_bid > 0 and best_ask > 0 and best_ask > best_bid:
+                    mid = (best_bid + best_ask) / 2.0
+                    spread_pct = (best_ask - best_bid) / max(mid, 0.001)
+                    if spread_pct > self.MAX_SPREAD_FILTER:
+                        skipped_spread += 1
+                        continue
+                    m["_spread_pct"] = round(spread_pct, 4)
+                else:
+                    m["_spread_pct"] = 1.0  # unknown spread, keep but flag
+
+                # Attach days-to-resolution for shorter-horizon preference
+                m["_days_to_end"] = days_to_end
                 
                 cleaned_markets.append(m)
             
             logger.info(
-                f"Fetched {len(cleaned_markets)} genuine active markets "
-                f"(from {len(raw_markets)} raw, horizon <= {MAX_DAYS_TO_RESOLUTION}d)."
+                f"Fetched {len(cleaned_markets)} tradeable markets "
+                f"(from {len(raw_markets)} raw, horizon <= {MAX_DAYS_TO_RESOLUTION}d, "
+                f"skipped: {skipped_volume} low-vol, {skipped_spread} wide-spread)."
             )
             return cleaned_markets
         except requests.exceptions.Timeout:
@@ -252,7 +370,7 @@ class PolymarketAdapter:
             if self.ws:
                 try:
                     self.ws.close()
-                except: pass
+                except Exception: pass
             
             self.ws = websocket.WebSocketApp(
                 self.ws_url,

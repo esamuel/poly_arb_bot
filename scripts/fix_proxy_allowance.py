@@ -2,10 +2,12 @@ import os
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
 from dotenv import load_dotenv
+from security_guard import enforce_fund_movement_guard
 
 load_dotenv()
 
 def fix_proxy_allowance():
+    enforce_fund_movement_guard("Fix proxy allowance")
     host = "https://clob.polymarket.com"
     key = os.getenv("PRIVATE_KEY")
     proxy = os.getenv("PROXY_ADDRESS")

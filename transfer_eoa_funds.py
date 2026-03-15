@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Transfer USDC from EOA wallet to Proxy wallet address"""
-import os
 import sys
 from web3 import Web3
 from eth_account import Account
@@ -8,8 +7,10 @@ from eth_account import Account
 # Add project to path
 sys.path.insert(0, '/app/poly_arb_bot')
 from poly_arb_bot.config import PRIVATE_KEY, PROXY_ADDRESS
+from scripts.security_guard import enforce_fund_movement_guard
 
 def main():
+    enforce_fund_movement_guard("EOA -> Proxy transfer")
     # Connect to Polygon
     w3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com"))
     
@@ -49,7 +50,7 @@ def main():
     eoa_balance = usdc.functions.balanceOf(eoa_account.address).call()
     proxy_balance = usdc.functions.balanceOf(PROXY_ADDRESS).call()
     
-    print(f"\nCurrent Balances:")
+    print("\nCurrent Balances:")
     print(f"  EOA: ${eoa_balance / 1e6:.6f} USDC")
     print(f"  Proxy: ${proxy_balance / 1e6:.6f} USDC")
     
@@ -92,7 +93,7 @@ def main():
         receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
         
         if receipt['status'] == 1:
-            print(f"✅ Transaction successful!")
+            print("✅ Transaction successful!")
             print(f"   Block: {receipt['blockNumber']}")
             print(f"   Gas used: {receipt['gasUsed']}")
             
@@ -100,11 +101,11 @@ def main():
             new_eoa_balance = usdc.functions.balanceOf(eoa_account.address).call()
             new_proxy_balance = usdc.functions.balanceOf(PROXY_ADDRESS).call()
             
-            print(f"\nNew Balances:")
+            print("\nNew Balances:")
             print(f"  EOA: ${new_eoa_balance / 1e6:.6f} USDC")
             print(f"  Proxy: ${new_proxy_balance / 1e6:.6f} USDC")
         else:
-            print(f"❌ Transaction failed!")
+            print("❌ Transaction failed!")
             
     except Exception as e:
         print(f"Error: {e}")

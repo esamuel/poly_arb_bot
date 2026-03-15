@@ -25,9 +25,12 @@ logging.basicConfig(level=LOG_LEVEL, format='%(asctime)s - %(name)s - %(levelnam
 logger = logging.getLogger(__name__)
 
 # --- Constants ---
+# Fee and slippage estimation
 POLYMARKET_FEE_RATE = 0.02       # Polymarket ~2% fee on winnings
 SLIPPAGE_BUFFER = 0.01           # 1% slippage buffer
-EFFECTIVE_MIN_PROFIT = MIN_PROFIT_THRESHOLD + POLYMARKET_FEE_RATE + SLIPPAGE_BUFFER
+# We need at least 3.5% edge to cover round-trip fees and slippage
+MIN_EFFECTIVE_EDGE = 0.035
+EFFECTIVE_MIN_PROFIT = max(MIN_PROFIT_THRESHOLD, MIN_EFFECTIVE_EDGE)
 TRADE_COOLDOWN_SECONDS = 60      # Minimum seconds between trades on the same pair
 OPPORTUNITY_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "opportunities.csv")
 MAX_PAIRS_TO_ANALYZE = 10        # Analyze up to 10 candidate pairs
@@ -103,7 +106,7 @@ class MonitoringSession:
             
             if isinstance(outcomes, str):
                 try: outcomes = json.loads(outcomes)
-                except: outcomes = ["No", "Yes"]
+                except (json.JSONDecodeError, ValueError): outcomes = ["No", "Yes"]
             
             if len(tokens) < 2: continue
 
@@ -427,7 +430,23 @@ def main():
                     logger.info(f"Generated {len(orders)} orders (BUY + SELL legs):")
                     for o in orders:
                         logger.info(f"  -> {o['side']} ${o['size']:.2f} of ...{o['token_id'][-8:]} @ {o['price']}")
-                    exec_engine.execute_arbitrage(orders)
+                    
+                    results = exec_engine.execute_arbitrage(orders)
+                    
+                    # --- FIX: Record results for circuit breaker ---
+                    successful_value = 0.0
+                    for r in results:
+                        if r.get("ok"):
+                            # Estimate profit/loss for this leg. For simplicity, we track volume-weighted PnL
+                            # In a real arb, we'd wait for settlement, but for the circuit breaker 
+                            # we should at least track that trades happened.
+                            successful_value += r['order']['size']
+                    
+                    # We record a small "cost" for each trade to represent fees/risk until settled
+                    # This ensures the daily loss limit can actually trigger.
+                    if successful_value > 0:
+                        exec_engine.record_trade_result(-successful_value * 0.02) # assume 2% cost/risk out the gate
+                    
                     session.mark_traded()
 
         except Exception as e:
@@ -493,7 +512,12 @@ def main():
                             
                             if orders:
                                 logger.info(f"Generated {len(orders)} REST-triggered orders.")
-                                exec_engine.execute_arbitrage(orders)
+                                results = exec_engine.execute_arbitrage(orders)
+                                
+                                # --- FIX: Record results for circuit breaker ---
+                                if any(r.get("ok") for r in results):
+                                    exec_engine.record_trade_result(-0.10) # Nominal risk record
+                                    
                                 session.mark_traded()
             
     except KeyboardInterrupt:

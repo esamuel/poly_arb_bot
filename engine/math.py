@@ -50,7 +50,6 @@ class MarketMath:
             logger.warning("No valid outcomes provided to Frank-Wolfe.")
             return current_prices.copy()
         
-        n_dim = current_prices.shape[0]
         epsilon = 1e-9
         
         # Initialization: uniform average of valid outcomes (centered start)

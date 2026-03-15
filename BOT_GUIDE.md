@@ -125,6 +125,11 @@ PRIMARY_HEALTH_URL=http://<mac-ip>:8080/health
 MAX_LIVE_ORDERS = 8                    # Max simultaneous open orders
 STALE_ORDER_TIMEOUT_SECONDS = 120      # Auto-cancel unfilled orders after 2 min
 MIN_BALANCE_RESERVE = 2.0              # Stop trading if wallet < $2
+
+# Security locks (recommended):
+ALLOW_FUND_MOVEMENTS=0                 # Keeps transfer/swap/allowance scripts blocked by default
+# Optional second factor for sensitive scripts:
+# FUND_MOVEMENT_UNLOCK_CODE=your-secret-code
 ```
 
 ---
@@ -161,6 +166,18 @@ curl -u admin:polyarb2026 -X POST http://localhost:8080/api/close_position \
 
 ```bash
 curl -u admin:polyarb2026 http://localhost:8080/api/positions | python3 -m json.tool
+```
+
+---
+
+## Tests
+
+```bash
+# Run in Docker (recommended — avoids numpy segfault on some Anaconda setups)
+./run_tests.sh
+
+# Or locally
+pytest tests/
 ```
 
 ---

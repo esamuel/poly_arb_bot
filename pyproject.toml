@@ -1,0 +1,12 @@
+[tool.ruff]
+line-length = 120
+exclude = ["scripts/"]
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = [
+    "E402",  # module-import-not-at-top: intentional (proxy patching before imports in polymarket.py)
+    "E501",  # line-too-long: not enforced in this codebase
+    "E701",  # multiple-statements-on-one-line-colon: style choice throughout codebase
+    "E731",  # lambda-assignment: intentional in proxy monkey-patching code
+]

@@ -167,7 +167,6 @@ class BotGuidePDF(FPDF):
         self.ln(2)
         col_count = len(headers)
         avail_w = self.w - self.l_margin - self.r_margin
-        col_w = avail_w / col_count
 
         # Auto-size columns based on content
         col_widths = []

@@ -12,7 +12,9 @@
 
 set -euo pipefail
 
-PROJECT_DIR="/opt/poly_arb_bot"
+# Use directory of this script, or /opt/poly_arb_bot if run directly
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="${PROJECT_DIR:-$SCRIPT_DIR}"
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Please run as root (or with sudo)."
