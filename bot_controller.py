@@ -262,7 +262,8 @@ class BotController:
             "trades_executed": 0,
             "daily_pnl": 0.0,
             "realized_pnl": 0.0,
-            "wallet_balance": None,
+            "wallet_balance": float(os.getenv("PAPER_BALANCE", "500")) if EXECUTION_MODE != "LIVE" else None,
+            "paper_balance_start": float(os.getenv("PAPER_BALANCE", "500")),
             "reserved_in_live_orders_estimate": 0.0,
             "live_orders_count": 0,
             "position_value_estimate": 0.0,
@@ -603,6 +604,10 @@ class BotController:
     def _refresh_account_metrics(self, adapter):
         """Refresh wallet balance and reserved collateral estimates."""
         if self.state.get("mode") != "LIVE":
+            # Paper mode: simulate balance = starting capital + realized P&L
+            start = self.state.get("paper_balance_start", 500.0)
+            realized = self.state.get("realized_pnl", 0.0)
+            self.state["wallet_balance"] = round(start + realized, 2)
             return
         try:
             perms = adapter.get_balance_allowance()
@@ -1785,6 +1790,7 @@ class BotController:
                 # Update mark price and shares from authoritative source
                 self.position_book[token_id]["last_mid"] = ex["last_mid"]
                 self.position_book[token_id]["shares"] = ex["shares"]
+                self.position_book[token_id]["avg_entry"] = ex["avg_entry"]
                 updated += 1
             else:
                 # Position exists on exchange but not in our book — add it
@@ -1858,7 +1864,8 @@ class BotController:
             if abs(shares) < 1 or mid <= 0:
                 continue
 
-            pnl_per_share = mid - avg_entry if shares > 0 else avg_entry - mid
+            # Long-only (Polymarket CLOB): shares is always positive here.
+            pnl_per_share = mid - avg_entry
             total_pnl = pnl_per_share * abs(shares)
             market_value = abs(shares) * mid
 
@@ -1953,7 +1960,6 @@ class BotController:
 
         # Refresh balance after sells so we have cash available for buy-backs
         if longs_to_sell:
-            self._refresh_account_metrics_cached(adapter)
             cash = self.state.get("wallet_balance") or 0.0
 
         self._refresh_account_metrics_cached(adapter)
