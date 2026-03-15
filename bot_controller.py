@@ -9,6 +9,7 @@ import json
 import csv
 import os
 import re
+import math
 import numpy as np
 import requests as _requests
 from typing import Dict, List, Tuple, Optional
@@ -27,6 +28,10 @@ from poly_arb_bot.engine.dependency import DependencyDetector
 
 logger = logging.getLogger(__name__)
 
+# Polymarket CLOB is long-only. All positions are non-negative.
+# "size" fields in orders represent USDC cost for BUY,
+# and number of shares for SELL.
+
 # --- Constants ---
 POLYMARKET_FEE_RATE = 0.01
 SLIPPAGE_BUFFER = 0.005
@@ -43,8 +48,10 @@ MIN_EXEC_PRICE = 0.01
 MAX_EXEC_PRICE = 0.99
 MAX_LIVE_ORDERS = 12
 STALE_ORDER_TIMEOUT_SECONDS = 60  # cancel unfilled orders after 60s
+STALE_CHECK_INTERVAL = 30.0
 CASH_RESERVE_RATIO = float(os.getenv("CASH_RESERVE_RATIO", "0.40"))  # keep 40% liquid
 MAX_CAPITAL_PER_TRADE_RATIO = float(os.getenv("MAX_CAPITAL_PER_TRADE_RATIO", "0.10"))  # max 10% per trade
+MAX_OPPORTUNITY_LOG_BYTES = 10 * 1024 * 1024  # 10 MB
 PREFER_SPORTS_TECH = os.getenv("PREFER_SPORTS_TECH", "1").strip().lower() in ("1", "true", "yes")
 MIN_SPORTS_TECH_PAIRS = int(os.getenv("MIN_SPORTS_TECH_PAIRS", "8"))
 MAX_POLITICS_PAIRS = int(os.getenv("MAX_POLITICS_PAIRS", "2"))
@@ -236,6 +243,10 @@ class BotController:
         self._lock = threading.Lock()
         
         self._trade_lock = threading.Lock()
+        self._position_book_lock = threading.Lock()
+        self._csv_lock = threading.Lock()
+        self._last_metrics_refresh = 0.0
+        self._last_stale_check = 0.0
         
         # Shared state for the dashboard
         self.state = {
@@ -609,6 +620,14 @@ class BotController:
         self._recompute_equity()
         self._save_runtime_state()
 
+    def _refresh_account_metrics_cached(self, adapter, min_interval: float = 5.0):
+        """Rate-limit account metric refreshes to avoid API overuse."""
+        now = time.time()
+        if now - self._last_metrics_refresh < min_interval:
+            return
+        self._refresh_account_metrics(adapter)
+        self._last_metrics_refresh = now
+
     def stop(self):
         with self._lock:
             if self.state["status"] == "stopped":
@@ -684,7 +703,7 @@ class BotController:
         if actual_shares < 1:
             # Not in book and no exchange balance — try reconciling first
             if token_id not in self.position_book:
-                self._reconcile_position_book(adapter)
+                self._runtime_reconcile_positions(adapter)
                 if token_id in self.position_book:
                     pos = self.position_book[token_id]
                     actual_shares = float(pos.get("shares", 0.0))
@@ -694,7 +713,7 @@ class BotController:
         pos = self.position_book.get(token_id, {})
         mid = float(pos.get("last_mid", 0.0))
         if mid <= 0:
-            book = adapter.get_midmarket_price(token_id)
+            book = adapter.get_best_bid_ask(token_id)
             mid = book.get("mid", 0.05)
         shares = actual_shares
 
@@ -765,7 +784,7 @@ class BotController:
 
             # Check initial balance & positions
             if self.state["mode"] == "LIVE":
-                self._refresh_account_metrics(adapter)
+                self._refresh_account_metrics_cached(adapter)
                 self._hydrate_positions_from_exchange(adapter)
                 self._recompute_equity()
 
@@ -852,7 +871,7 @@ class BotController:
                             # Pre-fill prices
                             for s in sessions:
                                 for tid in s.token_map:
-                                    book = adapter.get_midmarket_price(tid)
+                                    book = adapter.get_best_bid_ask(tid)
                                     if book["mid"] > 0:
                                         s.update_price(tid, book["mid"], book["bid"], book["ask"])
                             
@@ -903,7 +922,7 @@ class BotController:
                 if poll_counter % 30 == 0:
                     for session in sessions:
                         for token_id in session.token_map:
-                            book = adapter.get_midmarket_price(token_id)
+                            book = adapter.get_best_bid_ask(token_id)
                             if book["mid"] > 0:
                                 session.update_price(token_id, book["mid"], book["bid"], book["ask"])
                                 self._update_mark_price(token_id, book["mid"])
@@ -918,7 +937,7 @@ class BotController:
                                     self._execute_orders(exec_engine, orders, session, adapter)
                     
                     if self.state["mode"] == "LIVE":
-                        self._refresh_account_metrics(adapter)
+                        self._refresh_account_metrics_cached(adapter)
                     self.sessions_info = [s.to_dict() for s in sessions]
 
                 # G. Runtime reconciliation (every ~10 min)
@@ -1275,7 +1294,17 @@ class BotController:
             size = float(o.get("size", 0) or 0)
             if not tid or price <= 0:
                 continue
-            shares = size / price
+
+            # Unit convention:
+            # BUY  -> size is USDC cost, convert to shares.
+            # SELL -> size is already shares.
+            if side == "BUY":
+                shares = size / price
+            elif side == "SELL":
+                shares = size
+            else:
+                continue
+
             if side == "BUY":
                 reserved_buy[tid] = reserved_buy.get(tid, 0.0) + shares
             elif side == "SELL":
@@ -1300,7 +1329,11 @@ class BotController:
             if not tid or side not in ("BUY", "SELL") or price <= 0 or size <= 0:
                 continue
 
-            expected_shares = size / price
+            if side == "BUY":
+                expected_shares = size / price
+            else:
+                expected_shares = size
+
             key = (tid, side)
             avail = remaining.get(key, 0.0)
             matched_shares = min(expected_shares, avail)
@@ -1309,8 +1342,9 @@ class BotController:
 
             remaining[key] = max(avail - matched_shares, 0.0)
             matched_order = dict(o)
-            matched_order["size"] = round(matched_shares * price, 4)
-            self._apply_filled_order(matched_order)
+            matched_order["size"] = round(matched_shares * price, 4) if side == "BUY" else round(matched_shares, 4)
+            with self._position_book_lock:
+                self._apply_filled_order(matched_order)
             r["filled"] = True
             r["confirmed_by_balance"] = True
             r["filled_shares"] = round(matched_shares, 4)
@@ -1382,10 +1416,6 @@ class BotController:
                 "token": f"...{o['token_id'][-8:]}",
             })
 
-        original_mode = EXECUTION_MODE
-        import poly_arb_bot.config as cfg
-        cfg.EXECUTION_MODE = self.state["mode"]
-
         pre_balances = {}
         if self.state.get("mode") == "LIVE":
             try:
@@ -1394,24 +1424,34 @@ class BotController:
             except Exception:
                 pre_balances = {}
 
-        exec_results = exec_engine.execute_arbitrage(orders)
+        exec_results = []
+        try:
+            exec_results = exec_engine.execute_arbitrage(orders, mode=self.state["mode"])
+        finally:
+            session.mark_traded()
+
         if self.state.get("mode") == "LIVE":
             for r in exec_results:
                 if r.get("filled"):
-                    self._apply_filled_order(r["order"])
-            self._confirm_recent_fills(adapter, exec_results, pre_balances)
-        session.mark_traded()
-
-        cfg.EXECUTION_MODE = original_mode
+                    with self._position_book_lock:
+                        self._apply_filled_order(r["order"])
+            t = threading.Thread(
+                target=self._confirm_recent_fills,
+                args=(adapter, exec_results, pre_balances),
+                daemon=True,
+            )
+            t.start()
         self.state["daily_pnl"] = exec_engine.daily_pnl
         self.state["realized_pnl"] = float(exec_engine.daily_pnl)
         if self.state.get("mode") == "LIVE":
-            self._refresh_account_metrics(adapter)
+            self._refresh_account_metrics_cached(adapter)
         self._recompute_equity()
         self._save_runtime_state()
 
     def _apply_filled_order(self, order: Dict[str, float]):
-        """Update internal position book assuming order was filled."""
+        # NOTE: Polymarket CLOB is long-only. All conditional token
+        # positions are non-negative. Short-selling is not supported.
+        """Update internal long-only position book assuming order was filled."""
         token_id = order["token_id"]
         price = float(order["price"])
         size = float(order["size"])
@@ -1419,16 +1459,16 @@ class BotController:
             return
         delta = size / price
         side = str(order["side"]).upper()
-        signed_delta = delta if side == "BUY" else -delta
+        if side not in ("BUY", "SELL"):
+            return
+        if token_id not in self.position_book and side == "SELL":
+            self._log("INFO", f"Ignoring SELL fill for unknown long-only token ...{token_id[-8:]}")
+            return
+
         if token_id not in self.position_book:
             fair = float(order.get("fair_value", 0))
-            if side == "BUY":
-                # Take-profit: use fair value if available, otherwise % above entry
-                tp = fair if fair > price else min(price * (1 + TAKE_PROFIT_PCT), 0.99)
-                sl = max(price * (1 - STOP_LOSS_PCT), 0.01)
-            else:
-                tp = fair if 0 < fair < price else max(price * (1 - TAKE_PROFIT_PCT), 0.01)
-                sl = min(price * (1 + STOP_LOSS_PCT), 0.99)
+            tp = fair if fair > price else min(price * (1 + TAKE_PROFIT_PCT), 0.99)
+            sl = max(price * (1 - STOP_LOSS_PCT), 0.01)
             self.position_book[token_id] = {
                 "shares": 0.0,
                 "last_mid": price,
@@ -1441,20 +1481,16 @@ class BotController:
         pos = self.position_book[token_id]
         prev_shares = float(pos.get("shares", 0.0))
         prev_avg = float(pos.get("avg_entry", price))
-        new_shares = prev_shares + signed_delta
 
-        # Update average entry only when increasing exposure in same direction
-        # or when opening a fresh position after crossing through zero.
-        if abs(prev_shares) < 1e-8:
-            new_avg = price
-        elif (prev_shares > 0 and signed_delta > 0) or (prev_shares < 0 and signed_delta < 0):
-            total_abs = abs(prev_shares) + abs(signed_delta)
-            new_avg = ((abs(prev_shares) * prev_avg) + (abs(signed_delta) * price)) / max(total_abs, 1e-12)
-        elif (prev_shares > 0 > new_shares) or (prev_shares < 0 < new_shares):
-            # Position crossed zero; remainder is a fresh position at current fill.
-            new_avg = price
+        if side == "BUY":
+            total_shares = prev_shares + delta
+            new_avg = (
+                ((prev_shares * prev_avg) + (delta * price)) / max(total_shares, 1e-12)
+                if total_shares > 0 else price
+            )
+            new_shares = total_shares
         else:
-            # Reducing existing exposure keeps prior avg entry.
+            new_shares = max(prev_shares - delta, 0.0)
             new_avg = prev_avg
 
         pos["shares"] = new_shares
@@ -1462,7 +1498,7 @@ class BotController:
         pos["avg_entry"] = new_avg
 
         # Prune dust
-        if abs(pos["shares"]) < 1e-8:
+        if pos["shares"] < 1e-8:
             del self.position_book[token_id]
 
     def _update_mark_price(self, token_id: str, mid: float):
@@ -1478,7 +1514,7 @@ class BotController:
         side_u = side.upper()
         bid = ask = 0.0
         try:
-            book = adapter.get_midmarket_price(token_id)
+            book = adapter.get_best_bid_ask(token_id)
             bid = float(book.get("bid", 0.0) or 0.0)
             ask = float(book.get("ask", 0.0) or 0.0)
         except Exception:
@@ -1501,6 +1537,8 @@ class BotController:
         return round(min(max(px, MIN_EXEC_PRICE), MAX_EXEC_PRICE), 2)
 
     def _check_exit_signals(self, adapter):
+        # NOTE: Polymarket CLOB is long-only. All conditional token
+        # positions are non-negative. Short-selling is not supported.
         """
         Quick-flip exit logic: close positions that hit take-profit or stop-loss.
         Called periodically from the main loop.
@@ -1525,70 +1563,52 @@ class BotController:
             if target is None and stop is None:
                 continue
 
-            is_long = shares > 0
             reason = None
 
-            if is_long:
-                if target and mid >= target:
-                    reason = "TAKE-PROFIT"
-                elif stop and mid <= stop:
-                    reason = "STOP-LOSS"
-            else:
-                if target and mid <= target:
-                    reason = "TAKE-PROFIT"
-                elif stop and mid >= stop:
-                    reason = "STOP-LOSS"
+            if target and mid >= target:
+                reason = "TAKE-PROFIT"
+            elif stop and mid <= stop:
+                reason = "STOP-LOSS"
 
             if not reason:
                 continue
 
-            pnl_per = (mid - avg_entry) if is_long else (avg_entry - mid)
+            pnl_per = (mid - avg_entry)
             pnl_pct = (pnl_per / max(avg_entry, 0.001)) * 100
             age_min = (time.time() - float(p.get("opened_at", time.time()))) / 60
 
             try:
-                if is_long:
-                    params = BalanceAllowanceParams(
-                        asset_type=AssetType.CONDITIONAL,
-                        token_id=token_id,
-                        signature_type=adapter.signature_type
-                    )
-                    adapter.client.update_balance_allowance(params)
-                    bal = adapter.client.get_balance_allowance(params)
-                    actual = int(bal.get("balance", "0")) / 1e6
-                    if actual < 1:
-                        self.position_book.pop(token_id, None)
-                        continue
-                    sell_price = self._compute_exit_price(adapter, token_id, mid, "SELL")
-                    num = round(actual - 1, 0)
-                    if num < 1:
-                        self.position_book.pop(token_id, None)
-                        continue
-                    self._log("INFO",
-                        f"{reason}: SELL {num:.0f} shares ...{token_id[-8:]} "
-                        f"@ ${sell_price} (entry ${avg_entry:.3f}, PnL {pnl_pct:+.1f}%, held {age_min:.0f}min)"
-                    )
-                    resp = adapter.place_close_order(token_id, "SELL", sell_price, num)
-                else:
-                    cash = self.state.get("wallet_balance") or 0.0
-                    buy_price = self._compute_exit_price(adapter, token_id, mid, "BUY")
-                    num = round(abs(shares), 2)
-                    cost = buy_price * num
-                    if cash < cost + 2.0:
-                        continue
-                    self._log("INFO",
-                        f"{reason}: BUY-BACK {num:.0f} shares ...{token_id[-8:]} "
-                        f"@ ${buy_price} (entry ${avg_entry:.3f}, PnL {pnl_pct:+.1f}%, held {age_min:.0f}min)"
-                    )
-                    resp = adapter.place_close_order(token_id, "BUY", buy_price, num)
+                params = BalanceAllowanceParams(
+                    asset_type=AssetType.CONDITIONAL,
+                    token_id=token_id,
+                    signature_type=adapter.signature_type
+                )
+                adapter.client.update_balance_allowance(params)
+                bal = adapter.client.get_balance_allowance(params)
+                actual = int(bal.get("balance", "0")) / 1e6
+                if actual < 1:
+                    self.position_book.pop(token_id, None)
+                    continue
+
+                num = math.floor(actual)
+                if actual > 2:
+                    num = max(math.floor(actual - 1), 1)
+                if num < 1:
+                    self._log("INFO", f"SKIP EXIT: only {actual:.2f} shares on exchange for ...{token_id[-8:]}, removing from book")
+                    self.position_book.pop(token_id, None)
+                    continue
+
+                sell_price = self._compute_exit_price(adapter, token_id, mid, "SELL")
+                self._log("INFO",
+                    f"{reason}: SELL {num:.0f} shares ...{token_id[-8:]} "
+                    f"@ ${sell_price} (entry ${avg_entry:.3f}, PnL {pnl_pct:+.1f}%, held {age_min:.0f}min)"
+                )
+                resp = adapter.place_close_order(token_id, "SELL", sell_price, num)
 
                 if resp:
                     exits_triggered += 1
                     # Record realized P&L from the actual exit price (not mid estimate).
-                    if is_long:
-                        realized_pnl = (sell_price - avg_entry) * num
-                    else:
-                        realized_pnl = (avg_entry - buy_price) * num
+                    realized_pnl = (sell_price - avg_entry) * num
                     engine = self.exec_engine
                     if engine is not None:
                         engine.record_trade_result(realized_pnl)
@@ -1603,7 +1623,7 @@ class BotController:
 
         if exits_triggered > 0:
             self._log("INFO", f"Quick-flip: {exits_triggered} exit(s) triggered")
-            self._refresh_account_metrics(adapter)
+            self._refresh_account_metrics_cached(adapter)
             self._save_runtime_state()
 
     def _recompute_equity(self):
@@ -1627,12 +1647,15 @@ class BotController:
 
     def _cancel_stale_orders(self, adapter):
         """Cancel orders that have been live too long without filling."""
+        now = time.time()
+        if now - self._last_stale_check < STALE_CHECK_INTERVAL:
+            return
+        self._last_stale_check = now
         try:
             orders = adapter.get_open_orders()
             if not orders:
                 return
-            
-            now = time.time()
+
             cancelled_count = 0
             
             for o in orders:
@@ -1654,12 +1677,22 @@ class BotController:
                     # Try parsing ISO timestamp
                     if isinstance(created_raw, (int, float)):
                         created_ts = float(created_raw)
+                    elif isinstance(created_raw, str) and re.fullmatch(r"\d+(\.\d+)?", created_raw.strip()):
+                        created_ts = float(created_raw.strip())
                     else:
                         created_dt = datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
                         created_ts = created_dt.timestamp()
-                    
+
+                    # API timestamps may arrive in milliseconds.
+                    if created_ts > 1e12:
+                        created_ts /= 1000.0
+
                     age_seconds = now - created_ts
-                    
+
+                    # Ignore invalid timestamps rather than mass-canceling.
+                    if age_seconds < 0 or age_seconds > 86400 * 30:
+                        continue
+
                     if age_seconds > STALE_ORDER_TIMEOUT_SECONDS:
                         order_id = o.get("id") or o.get("orderID") or o.get("order_id")
                         if order_id:
@@ -1672,7 +1705,7 @@ class BotController:
             if cancelled_count > 0:
                 self._log("INFO", f"Cancelled {cancelled_count} stale orders.")
                 # Refresh metrics after cancellations
-                self._refresh_account_metrics(adapter)
+                self._refresh_account_metrics_cached(adapter)
         except Exception as e:
             self._log("WARNING", f"Stale order cleanup failed: {e}")
 
@@ -1760,12 +1793,17 @@ class BotController:
                     f"RECONCILE: Adding missing position ...{token_id[-8:]} "
                     f"({ex['shares']:.1f} shares @ {ex['last_mid']:.4f})"
                 )
+                avg = ex["avg_entry"]
+                tp = min(avg * (1 + TAKE_PROFIT_PCT), 0.99)
+                sl = max(avg * (1 - STOP_LOSS_PCT), 0.01)
                 self.position_book[token_id] = {
                     "shares": ex["shares"],
                     "last_mid": ex["last_mid"],
-                    "avg_entry": ex["avg_entry"],
+                    "avg_entry": avg,
                     "opened_at": time.time(),
                     "question": ex["question"],
+                    "target_exit": round(tp, 4),
+                    "stop_exit": round(sl, 4),
                 }
                 added += 1
 
@@ -1780,54 +1818,18 @@ class BotController:
 
 
     def _reconcile_position_book(self, adapter):
-        """
-        Reconcile internal position book against actual exchange positions.
-        Removes phantom entries that have zero shares on the exchange.
-        This prevents the negative-equity / stale-position bug.
-        """
-        if not self.position_book:
-            return
-        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-        removed = 0
-        for token_id in list(self.position_book.keys()):
-            p = self.position_book[token_id]
-            shares = float(p.get("shares", 0.0))
-            if shares > 0:
-                # Long — check actual token balance
-                try:
-                    params = BalanceAllowanceParams(
-                        asset_type=AssetType.CONDITIONAL,
-                        token_id=token_id,
-                        signature_type=adapter.signature_type
-                    )
-                    bal = adapter.client.get_balance_allowance(params)
-                    actual = int(bal.get("balance", "0")) / 1e6
-                    if actual < 1:
-                        self._log("INFO", f"RECONCILE: Removing phantom LONG ...{token_id[-8:]} (book={shares:.0f}, exchange={actual:.0f})")
-                        del self.position_book[token_id]
-                        removed += 1
-                except Exception:
-                    pass  # skip on error, will retry next cycle
-            elif shares < 0:
-                # Polymarket CLOB has no true short-selling — you can only hold tokens
-                # you own (positive balance). Any negative-share entry is a phantom
-                # produced by the old hydration sign bug. Remove it unconditionally.
-                self._log("INFO", f"RECONCILE: Removing phantom SHORT ...{token_id[-8:]} (shares={shares:.2f}) — true shorts are impossible on Polymarket CLOB")
-                del self.position_book[token_id]
-                removed += 1
-        if removed > 0:
-            self._log("INFO", f"RECONCILE: Cleaned {removed} phantom position(s)")
-            self._recompute_equity()
-            self._save_runtime_state()
+        """@deprecated: use _runtime_reconcile_positions() as single source of truth."""
+        self._runtime_reconcile_positions(adapter)
 
     def _run_position_recycler(self, adapter):
+        # NOTE: Polymarket CLOB is long-only. All conditional token
+        # positions are non-negative. Short-selling is not supported.
         """
         Automatic position recycling logic. Called periodically from the main loop.
 
-        Three-phase approach:
+        Two-phase approach:
           Phase 0 — RECONCILE book vs exchange (remove phantoms)
           Phase 1 — SELL longs (requires shares on exchange, NOT cash)
-          Phase 2 — BUY-BACK shorts (requires cash freed from Phase 1)
         """
         if self.state.get("mode") != "LIVE":
             return
@@ -1835,7 +1837,7 @@ class BotController:
             return
 
         # Phase 0: Reconcile before any trading decisions
-        self._reconcile_position_book(adapter)
+        self._runtime_reconcile_positions(adapter)
 
         if not self.position_book:
             return
@@ -1845,7 +1847,6 @@ class BotController:
         now = time.time()
         cash = self.state.get("wallet_balance") or 0.0
         longs = []
-        shorts = []
 
         for token_id, p in list(self.position_book.items()):
             shares = float(p.get("shares", 0.0))
@@ -1875,35 +1876,28 @@ class BotController:
             }
             if shares > 0:
                 longs.append(entry)
-            else:
-                shorts.append(entry)
-
-        if not longs and not shorts:
+        if not longs:
             return
 
         longs.sort(key=lambda c: (-c["pnl"], -c["market_value"]))
-        shorts.sort(key=lambda c: (-c["pnl"], -c["market_value"]))
 
         def _should_recycle(c):
-            if cash < RECYCLE_MIN_CASH_RESERVE:
-                return True
             if c["is_expired"]:
                 return True
             if c["is_profitable"] and c["is_mature"]:
                 return True
+            if cash < RECYCLE_MIN_CASH_RESERVE and c["is_profitable"]:
+                return True
             return False
 
         longs_to_sell = [c for c in longs if _should_recycle(c)]
-        shorts_to_buy = [c for c in shorts if _should_recycle(c)]
-
-        total = len(longs_to_sell) + len(shorts_to_buy)
-        if total == 0:
+        if not longs_to_sell:
             return
 
         if cash < RECYCLE_MIN_CASH_RESERVE:
             self._log("INFO", f"RECYCLER: Cash low (${cash:.2f} < ${RECYCLE_MIN_CASH_RESERVE}). Selling longs first to free capital.")
 
-        self._log("INFO", f"RECYCLER: {len(longs_to_sell)} longs to sell, {len(shorts_to_buy)} shorts to buy-back")
+        self._log("INFO", f"RECYCLER: {len(longs_to_sell)} long positions queued for recycle")
 
         # --- Phase 1: Sell longs (no cash required, only shares) ---
         for c in longs_to_sell:
@@ -1929,7 +1923,9 @@ class BotController:
                     continue
 
                 sell_price = self._compute_exit_price(adapter, token_id, mid, "SELL")
-                num_shares = round(actual - 1, 0)
+                num_shares = math.floor(actual)
+                if actual > 2:
+                    num_shares = max(math.floor(actual - 1), 1)
                 if num_shares < 1:
                     self._log("INFO", f"RECYCLER: ...{token_id[-8:]} only {actual:.0f} share on exchange, removing from book")
                     self.position_book.pop(token_id, None)
@@ -1957,50 +1953,10 @@ class BotController:
 
         # Refresh balance after sells so we have cash available for buy-backs
         if longs_to_sell:
-            self._refresh_account_metrics(adapter)
+            self._refresh_account_metrics_cached(adapter)
             cash = self.state.get("wallet_balance") or 0.0
 
-        # --- Phase 2: Buy-back shorts (requires cash freed from Phase 1) ---
-        for c in shorts_to_buy:
-            token_id = c["token_id"]
-            mid = c["mid"]
-            pnl = c["pnl"]
-            age_hours = c["age"] / 3600
-            reason = "expired" if c["is_expired"] else ("profitable" if c["is_profitable"] else "low cash")
-
-            buy_price = self._compute_exit_price(adapter, token_id, mid, "BUY")
-            num_shares = round(abs(c["shares"]), 2)
-            cost_estimate = buy_price * num_shares
-
-            if cash < max(cost_estimate + 1.0, 2.0):
-                self._log("INFO",
-                    f"RECYCLER: Skipping short buy-back ...{token_id[-8:]} "
-                    f"(need ~${cost_estimate:.2f}, have ${cash:.2f}). Waiting for long sells to settle."
-                )
-                continue
-
-            try:
-                self._log("INFO",
-                    f"RECYCLER BUY-BACK: {num_shares:.0f} shares of ...{token_id[-8:]} "
-                    f"@ ${buy_price} (PnL: ${pnl:+.2f}, held {age_hours:.1f}h, reason: {reason})"
-                )
-                resp = adapter.place_close_order(token_id, "BUY", buy_price, num_shares)
-                if resp:
-                    self._log("INFO", f"RECYCLER: Buy-back order placed: {resp.get('orderID', '?')[:16]}...")
-                    _ae = self.position_book.get(token_id, {}).get("avg_entry")
-                    avg_entry = _ae if _ae is not None else buy_price
-                    realized_pnl = (avg_entry - buy_price) * num_shares
-                    engine = self.exec_engine
-                    if engine is not None:
-                        engine.record_trade_result(realized_pnl)
-                        self.state["daily_pnl"] = engine.daily_pnl
-                        self.state["realized_pnl"] = float(engine.daily_pnl)
-                    self.position_book.pop(token_id, None)
-                    cash -= cost_estimate
-            except Exception as e:
-                self._log("WARNING", f"RECYCLER: Failed to buy-back ...{token_id[-8:]}: {e}")
-
-        self._refresh_account_metrics(adapter)
+        self._refresh_account_metrics_cached(adapter)
         self._save_runtime_state()
 
     def _record_opportunity(self, profit, session):
@@ -2014,16 +1970,20 @@ class BotController:
         })
         # Also log to CSV
         try:
-            exists = os.path.exists(OPPORTUNITY_LOG_FILE)
-            with open(OPPORTUNITY_LOG_FILE, "a", newline="") as f:
-                w = csv.writer(f)
-                if not exists:
-                    w.writerow(["timestamp","profit","prices","market_a","market_b"])
-                w.writerow([
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    f"{profit:.5f}",
-                    np.array2string(session.prices, precision=4, separator=', '),
-                    session.markets[0].get("question","?")[:80] if len(session.markets)>0 else "",
-                    session.markets[1].get("question","?")[:80] if len(session.markets)>1 else "",
-                ])
+            with self._csv_lock:
+                if os.path.exists(OPPORTUNITY_LOG_FILE):
+                    if os.path.getsize(OPPORTUNITY_LOG_FILE) > MAX_OPPORTUNITY_LOG_BYTES:
+                        os.replace(OPPORTUNITY_LOG_FILE, OPPORTUNITY_LOG_FILE + ".bak")
+                exists = os.path.exists(OPPORTUNITY_LOG_FILE)
+                with open(OPPORTUNITY_LOG_FILE, "a", newline="") as f:
+                    w = csv.writer(f)
+                    if not exists:
+                        w.writerow(["timestamp","profit","prices","market_a","market_b"])
+                    w.writerow([
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        f"{profit:.5f}",
+                        np.array2string(session.prices, precision=4, separator=', '),
+                        session.markets[0].get("question","?")[:80] if len(session.markets)>0 else "",
+                        session.markets[1].get("question","?")[:80] if len(session.markets)>1 else "",
+                    ])
         except Exception: pass

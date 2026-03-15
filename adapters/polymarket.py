@@ -492,8 +492,8 @@ class PolymarketAdapter:
             logger.error(f"Error fetching book for {token_id[-8:]}: {e}")
             return {}
 
-    def get_midmarket_price(self, token_id: str) -> Dict[str, float]:
-        """Get best bid, best ask, and midpoint for a token from REST."""
+    def get_best_bid_ask(self, token_id: str) -> Dict[str, float]:
+        """Returns {'bid': float, 'ask': float, 'mid': float} for the given token."""
         book = self.get_order_book(token_id)
         bids = book.get("bids", [])
         asks = book.get("asks", [])

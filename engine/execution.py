@@ -1,6 +1,5 @@
 import logging
 from typing import Dict, Any, List
-import poly_arb_bot.config as cfg
 from poly_arb_bot.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 import json
 import os
@@ -94,7 +93,7 @@ class ExecutionEngine:
         self._save_stats()
         logger.info(f"Trade recorded. Daily PnL: ${self.daily_pnl:.2f} | Trades today: {self.daily_trade_count}")
 
-    def execute_arbitrage(self, orders: List[Dict[str, Any]]):
+    def execute_arbitrage(self, orders: List[Dict[str, Any]], mode: str = "PAPER"):
         """
         Execute a batch of orders for an arbitrage opportunity.
         Each order dict should have:
@@ -110,8 +109,11 @@ class ExecutionEngine:
         total_value = sum(o.get('size', 0) for o in orders)
         logger.info(f"Preparing to execute {len(orders)} orders. Total Value: ${total_value:.2f}")
 
+        # Use explicit mode passed by caller to avoid mutating global config.
+        exec_mode = (mode or "PAPER").upper()
+
         # --- PAPER MODE ---
-        if cfg.EXECUTION_MODE != "LIVE":
+        if exec_mode != "LIVE":
             logger.info(f"[PAPER MODE] Simulated execution of {len(orders)} orders:")
             simulated_results = []
             for o in orders:

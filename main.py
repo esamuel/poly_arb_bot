@@ -310,7 +310,7 @@ def main():
     logger.info("Fetching initial order books from REST API...")
     for session in sessions:
         for token_id, idx in session.token_map.items():
-            book_data = adapter.get_midmarket_price(token_id)
+            book_data = adapter.get_best_bid_ask(token_id)
             if book_data["mid"] > 0:
                 session.update_price(token_id, book_data["mid"], book_data["bid"], book_data["ask"])
         
@@ -479,7 +479,7 @@ def main():
                 logger.info("Periodic REST book poll...")
                 for session in sessions:
                     for token_id, idx in session.token_map.items():
-                        book_data = adapter.get_midmarket_price(token_id)
+                        book_data = adapter.get_best_bid_ask(token_id)
                         if book_data["mid"] > 0:
                             session.update_price(token_id, book_data["mid"], book_data["bid"], book_data["ask"])
                     
