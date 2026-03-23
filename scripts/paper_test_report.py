@@ -73,6 +73,8 @@ def build_report(state: dict, positions: list) -> str:
     trades = int(state.get("trades_executed") or 0)
     opps_found = int(state.get("opportunities_found") or 0)
     pairs = int(state.get("pairs_monitored") or 0)
+    if pairs == 0:
+        pairs = len(state.get("sessions") or [])
 
     # ROI vs starting $500
     roi_pct = (total_pnl / PAPER_BALANCE_START) * 100 if PAPER_BALANCE_START else 0.0
@@ -94,18 +96,30 @@ def build_report(state: dict, positions: list) -> str:
         f"Pairs monitored:  {pairs}",
     ]
 
-    # Recent trades from state
+    # Recent trades from state (each row is one CLOB order leg, not a closed round-trip)
     recent_trades = state.get("recent_trades") or []
     if recent_trades:
         lines.append("")
-        lines.append("─── 🔄 RECENT TRADES ───")
+        lines.append("─── 🔄 RECENT ORDER LEGS ───")
+        lines.append(
+            "<i>(Last legs logged — token id suffix; notional + limit price. "
+            "Per-leg P&amp;L is not stored; use Realized/Unrealized above.)</i>"
+        )
         for i, t in enumerate(recent_trades[-8:], 1):
-            mkt = (str(t.get("market") or t.get("token_id") or "?"))[-20:]
+            # bot_controller stores: time, side, price, size, token (not token_id)
+            tok = str(
+                t.get("token")
+                or t.get("token_id")
+                or t.get("market")
+                or "?"
+            )
             side = str(t.get("side") or "?").upper()
-            pnl_t = t.get("pnl") or t.get("realized_pnl") or 0.0
-            price = t.get("price") or t.get("fill_price") or 0.0
+            price = float(t.get("price") or t.get("fill_price") or 0.0)
+            size = float(t.get("size") or 0.0)
+            clock = str(t.get("time") or "")
+            prefix = f"{i}. [{clock}] " if clock else f"{i}. "
             lines.append(
-                f"{i}. {side} ...{mkt}  price={float(price):.3f}  pnl={_sign(float(pnl_t))}"
+                f"{prefix}{side} {tok}  ${size:.2f} @ {price:.4f}"
             )
 
     # Open positions
